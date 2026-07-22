@@ -1,0 +1,6 @@
+yfinance
+pywebpush
+flask
+python-dotenv
+requests
+feedparser
