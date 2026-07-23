@@ -57,3 +57,23 @@ def get_quotes(tickers):
             print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance -- {type(e).__name__}: {e}")
 
     return quotes
+
+
+def get_daily_avg(tickers, days=90):
+    """
+    Promedio real de cierre de los ultimos `days` dias, calculado
+    directamente desde el historico de Yahoo Finance (no depende de
+    que este servicio lleve tiempo corriendo, a diferencia del promedio
+    que acumula alerts_engine.py). Mas lento que get_quotes() porque
+    pide el historial completo por cada ticker -- por eso server.py lo
+    cachea en vez de llamarlo en cada request.
+    """
+    avgs = {}
+    for t in tickers:
+        try:
+            hist = yf.Ticker(t + SUFFIX).history(period=f"{days}d")
+            if not hist.empty:
+                avgs[t] = float(hist["Close"].mean())
+        except Exception as e:
+            print(f"[data_source] Error obteniendo promedio 90d de {t}: {e}")
+    return avgs
