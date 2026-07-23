@@ -1,0 +1,43 @@
+name: Monitoreo IPSA
+
+on:
+  schedule:
+    # Cada 10 minutos, lunes a viernes, 12:00-21:00 UTC.
+    # Esto cubre con margen el horario de la Bolsa de Santiago
+    # (9:30-16:00 hora Chile), sin depender de saber si Chile está en
+    # horario de verano o no. Ajusta si quieres afinar la ventana.
+    - cron: '*/10 12-21 * * 1-5'
+  workflow_dispatch: {}   # permite ejecutarlo manualmente desde GitHub para probar
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar ciclo de monitoreo
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: 587
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_CLAIMS_EMAIL: ${{ secrets.VAPID_CLAIMS_EMAIL }}
+          SUBSCRIPTIONS_URL: ${{ secrets.SUBSCRIPTIONS_URL }}
+        run: python main.py
+
+      - name: Guardar el historial de precios actualizado
+        run: |
+          git config user.name "ipsa-monitor-bot"
+          git config user.email "actions@github.com"
+          git add price_history.json
+          git diff --staged --quiet || git commit -m "Actualiza historial de precios [skip ci]"
+          git push
