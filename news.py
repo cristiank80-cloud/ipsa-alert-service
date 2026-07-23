@@ -63,6 +63,9 @@ NEWS_QUERY = {
     "BLUMAR": "Blumar pesquera",
     "ORO-BLANCO": "Oro Blanco SQM",
     "AAISA": "AAISA ILC",
+    "ENJOY": "Enjoy casinos reorganización judicial",
+    "INDISA": "Clínica Indisa",
+    "SOCOVESA": "Socovesa inmobiliaria",
 }
 
 
