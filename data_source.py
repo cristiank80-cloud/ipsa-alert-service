@@ -36,17 +36,24 @@ def get_quotes(tickers):
     for t, ysym in zip(tickers, yahoo_symbols):
         try:
             info = batch.tickers[ysym].fast_info
+            # Si el ticker no existe o esta deslistado, yfinance no logra
+            # construir fast_info correctamente -- probamos leer un campo
+            # basico primero para detectar eso con un mensaje claro.
+            try:
+                _ = info["lastPrice"]
+            except (KeyError, Exception):
+                pass
             price = info.get("lastPrice") if hasattr(info, "get") else None
             if price is None:
                 price = getattr(info, "last_price", None)
             if price is None:
-                print(f"[data_source] No se pudo leer precio para {t}")
+                print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance (posiblemente el símbolo no existe o está deslistado)")
                 continue
             quotes[t] = {
                 "price": float(price),
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as e:
-            print(f"[data_source] Error consultando {t}: {e}")
+            print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance -- {type(e).__name__}: {e}")
 
     return quotes
