@@ -1,59 +1,80 @@
 """
-Fuente de datos: Yahoo Finance, via la libreria 'yfinance'. No requiere
-API key ni pedir acceso a nadie.
+Punto de entrada: revisa todas las acciones y dispara alertas (correo +
+push) apenas alguna cruza bajo su promedio histórico de 90 días.
 
-Los tickers chilenos en Yahoo Finance usan el sufijo ".SN" (Bolsa de
-Santiago), ej. SQM-B.SN, FALABELLA.SN, BSANTANDER.SN. Confirmado que
-existen para las 8 acciones de este proyecto.
-
-HONESTIDAD SOBRE EL REZAGO: Yahoo etiqueta estas cotizaciones como
-"Delayed Quote" (cotizacion con rezago). No publican el numero exacto
-de minutos. Es gratis e inmediato, pero si en algun momento consigues
-la API de la Bolsa de Santiago o de tu corredora con menor rezago,
-basta con reemplazar la funcion get_quotes() de este archivo — el resto
-del servicio (alerts_engine, notify, main) no necesita cambios.
+Uso:
+    python main.py            -> corre UN ciclo y termina (para GitHub Actions)
+    python main.py --loop     -> corre en bucle infinito (para probar en tu compu)
 """
-from datetime import datetime
-import yfinance as yf
+import os
+import sys
+import time
 
-SUFFIX = ".SN"
+from data_source import get_quotes
+from alerts_engine import update_and_check, get_price_series
+from notify import send_email_alert, send_push_alert
+import indicators
+import news
+
+TICKERS = [
+    "AGUAS-A", "ANDINA-B", "BCI", "BSANTANDER", "CAP", "CCU",
+    "CENCOSUD", "CHILE", "CMPC", "COLBUN", "CONCHATORO",
+    "COPEC", "ECL", "ENELAM", "ENELCHILE", "ENTEL", "FALABELLA", "IAM",
+    "LTM", "MALLPLAZA", "PARAUCO", "RIPLEY",
+    "SMU", "SONDA", "SQM-B", "VAPORES",
+    # -- Las siguientes son del IGPA (indice mas amplio), no del IPSA --
+    "ANTARCHILE", "QUINENCO", "HABITAT", "CUPRUM",
+    "PROVIDA", "PLANVITAL", "SK", "CAMANCHACA",
+    "ALMENDRAL", "ENELGXCH", "WATTS", "CRISTALES", "BESALCO",
+    "PUCOBRE", "LIPIGAS", "BLUMAR", "ORO-BLANCO", "AAISA",
+    # Removidas (no existen en Yahoo Finance con .SN, confirmado en produccion):
+    # CENCOSHOPP, ITAUCORP, SECURITY, BICECORP, SAAM, EMBONOR
+]
+
+POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", 300))
 
 
-def get_quotes(tickers):
-    """
-    Devuelve {ticker: {"price": float, "timestamp": str}} para cada
-    nemotecnico solicitado (sin el sufijo .SN).
-    """
-    quotes = {}
-    yahoo_symbols = [t + SUFFIX for t in tickers]
+def run_once():
+    quotes = get_quotes(TICKERS)
+    for ticker, q in quotes.items():
+        price = q["price"]
+        avg, is_below, crossed_now = update_and_check(ticker, price)
 
-    try:
-        batch = yf.Tickers(" ".join(yahoo_symbols))
-    except Exception as e:
-        print(f"[data_source] Error creando cliente Yahoo Finance: {e}")
-        return quotes
+        if crossed_now:
+            pct_below = (1 - price / avg) * 100
+            serie = get_price_series(ticker)
+            indic = indicators.summarize(serie)
+            indic_texto = indicators.describe(indic)
 
-    for t, ysym in zip(tickers, yahoo_symbols):
+            noticias = news.get_recent_news(ticker)
+            noticias_texto = news.describe(noticias)
+
+            print(f"[ALERTA] {ticker} cruzó bajo el promedio: {price} vs {avg:.0f} ({pct_below:.1f}%) · {indic_texto}")
+            if noticias:
+                print(f"  {noticias_texto}")
+
+            mensaje_extra = indic_texto + "\n\n" + noticias_texto
+            send_email_alert(ticker, price, avg, pct_below, mensaje_extra)
+            # Al push (celular) solo mandamos los indicadores -- las notificaciones
+            # push tienen poco espacio, y si hay noticia, el correo trae el detalle.
+            send_push_alert(ticker, price, avg, pct_below, indic_texto)
+        elif is_below:
+            print(f"[info] {ticker} sigue bajo el promedio, no se reenvía alerta.")
+
+
+def loop_forever():
+    print(f"Iniciando monitoreo IPSA en bucle · cada {POLL_INTERVAL_SECONDS}s · {len(TICKERS)} acciones")
+    while True:
         try:
-            info = batch.tickers[ysym].fast_info
-            # Si el ticker no existe o esta deslistado, yfinance no logra
-            # construir fast_info correctamente -- probamos leer un campo
-            # basico primero para detectar eso con un mensaje claro.
-            try:
-                _ = info["lastPrice"]
-            except (KeyError, Exception):
-                pass
-            price = info.get("lastPrice") if hasattr(info, "get") else None
-            if price is None:
-                price = getattr(info, "last_price", None)
-            if price is None:
-                print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance (posiblemente el símbolo no existe o está deslistado)")
-                continue
-            quotes[t] = {
-                "price": float(price),
-                "timestamp": datetime.now().isoformat(),
-            }
+            run_once()
         except Exception as e:
-            print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance -- {type(e).__name__}: {e}")
+            print(f"[main] Error en ciclo de monitoreo: {e}")
+        time.sleep(POLL_INTERVAL_SECONDS)
 
-    return quotes
+
+if __name__ == "__main__":
+    if "--loop" in sys.argv:
+        loop_forever()
+    else:
+        print(f"Ejecutando un ciclo único · {len(TICKERS)} acciones")
+        run_once()
