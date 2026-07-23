@@ -27,6 +27,7 @@ TICKERS = [
     "PROVIDA", "PLANVITAL", "SK", "CAMANCHACA",
     "ALMENDRAL", "ENELGXCH", "WATTS", "CRISTALES", "BESALCO",
     "PUCOBRE", "LIPIGAS", "BLUMAR", "ORO-BLANCO", "AAISA",
+    "ENJOY", "INDISA", "SOCOVESA",
     # Removidas (no existen en Yahoo Finance con .SN, confirmado en produccion):
     # CENCOSHOPP, ITAUCORP, SECURITY, BICECORP, SAAM, EMBONOR
 ]
