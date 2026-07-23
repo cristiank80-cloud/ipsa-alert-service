@@ -36,27 +36,53 @@ def get_quotes(tickers):
     for t, ysym in zip(tickers, yahoo_symbols):
         try:
             info = batch.tickers[ysym].fast_info
-            # Si el ticker no existe o esta deslistado, yfinance no logra
-            # construir fast_info correctamente -- probamos leer un campo
-            # basico primero para detectar eso con un mensaje claro.
-            try:
-                _ = info["lastPrice"]
-            except (KeyError, Exception):
-                pass
-            price = info.get("lastPrice") if hasattr(info, "get") else None
-            if price is None:
-                price = getattr(info, "last_price", None)
+
+            def _get(key_camel, key_snake):
+                if hasattr(info, "get"):
+                    v = info.get(key_camel)
+                    if v is not None:
+                        return v
+                return getattr(info, key_snake, None)
+
+            price = _get("lastPrice", "last_price")
             if price is None:
                 print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance (posiblemente el símbolo no existe o está deslistado)")
                 continue
+
             quotes[t] = {
                 "price": float(price),
                 "timestamp": datetime.now().isoformat(),
+                "dayHigh": _get("dayHigh", "day_high"),
+                "dayLow": _get("dayLow", "day_low"),
+                "volume": _get("lastVolume", "last_volume"),
             }
         except Exception as e:
             print(f"[data_source] {t} ({ysym}): sin datos disponibles en Yahoo Finance -- {type(e).__name__}: {e}")
 
     return quotes
+
+
+def get_returns(tickers):
+    """
+    Rentabilidad REAL de 3 meses y 1 año, calculada desde el cierre de
+    Yahoo Finance de hace ~63 y ~252 dias habiles atras vs. el cierre
+    mas reciente disponible en el historial (aprox. 1 año de datos).
+    """
+    rets = {}
+    for t in tickers:
+        try:
+            hist = yf.Ticker(t + SUFFIX).history(period="1y")
+            closes = hist["Close"].dropna()
+            if len(closes) < 5:
+                continue
+            last = float(closes.iloc[-1])
+            idx_3m = max(0, len(closes) - 63)
+            ret_3m = (last / float(closes.iloc[idx_3m])) - 1
+            ret_1y = (last / float(closes.iloc[0])) - 1
+            rets[t] = {"ret_3m": ret_3m, "ret_1y": ret_1y}
+        except Exception as e:
+            print(f"[data_source] Error obteniendo rentabilidad de {t}: {e}")
+    return rets
 
 
 def get_daily_avg(tickers, days=90):
