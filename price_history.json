@@ -1,0 +1,266 @@
+{
+  "AGUAS-A": {
+    "prices": {
+      "2026-07-23": 339.0
+    },
+    "was_below": false
+  },
+  "ANDINA-B": {
+    "prices": {
+      "2026-07-23": 4700.0
+    },
+    "was_below": false
+  },
+  "BCI": {
+    "prices": {
+      "2026-07-23": 64500.0
+    },
+    "was_below": false
+  },
+  "BSANTANDER": {
+    "prices": {
+      "2026-07-23": 79.8499984741211
+    },
+    "was_below": false
+  },
+  "CAP": {
+    "prices": {
+      "2026-07-23": 6300.0
+    },
+    "was_below": false
+  },
+  "CCU": {
+    "prices": {
+      "2026-07-23": 5420.7001953125
+    },
+    "was_below": false
+  },
+  "CENCOSUD": {
+    "prices": {
+      "2026-07-23": 2009.800048828125
+    },
+    "was_below": false
+  },
+  "CHILE": {
+    "prices": {
+      "2026-07-23": 193.5
+    },
+    "was_below": false
+  },
+  "CMPC": {
+    "prices": {
+      "2026-07-23": 1070.0
+    },
+    "was_below": false
+  },
+  "COLBUN": {
+    "prices": {
+      "2026-07-23": 140.3000030517578
+    },
+    "was_below": false
+  },
+  "CONCHATORO": {
+    "prices": {
+      "2026-07-23": 848.97998046875
+    },
+    "was_below": false
+  },
+  "COPEC": {
+    "prices": {
+      "2026-07-23": 6550.0
+    },
+    "was_below": false
+  },
+  "ECL": {
+    "prices": {
+      "2026-07-23": 1865.0
+    },
+    "was_below": false
+  },
+  "ENELAM": {
+    "prices": {
+      "2026-07-23": 84.52999877929688
+    },
+    "was_below": false
+  },
+  "ENELCHILE": {
+    "prices": {
+      "2026-07-23": 81.25
+    },
+    "was_below": false
+  },
+  "ENTEL": {
+    "prices": {
+      "2026-07-23": 3610.0
+    },
+    "was_below": false
+  },
+  "FALABELLA": {
+    "prices": {
+      "2026-07-23": 6042.0
+    },
+    "was_below": false
+  },
+  "IAM": {
+    "prices": {
+      "2026-07-23": 920.0
+    },
+    "was_below": false
+  },
+  "LTM": {
+    "prices": {
+      "2026-07-23": 24.09000015258789
+    },
+    "was_below": false
+  },
+  "MALLPLAZA": {
+    "prices": {
+      "2026-07-23": 3820.199951171875
+    },
+    "was_below": false
+  },
+  "PARAUCO": {
+    "prices": {
+      "2026-07-23": 3993.10009765625
+    },
+    "was_below": false
+  },
+  "RIPLEY": {
+    "prices": {
+      "2026-07-23": 383.9800109863281
+    },
+    "was_below": false
+  },
+  "SMU": {
+    "prices": {
+      "2026-07-23": 131.0
+    },
+    "was_below": false
+  },
+  "SONDA": {
+    "prices": {
+      "2026-07-23": 309.99
+    },
+    "was_below": false
+  },
+  "SQM-B": {
+    "prices": {
+      "2026-07-23": 65055.0
+    },
+    "was_below": false
+  },
+  "VAPORES": {
+    "prices": {
+      "2026-07-23": 48.29999923706055
+    },
+    "was_below": false
+  },
+  "ANTARCHILE": {
+    "prices": {
+      "2026-07-23": 7698.39990234375
+    },
+    "was_below": false
+  },
+  "QUINENCO": {
+    "prices": {
+      "2026-07-23": 4300.0
+    },
+    "was_below": false
+  },
+  "HABITAT": {
+    "prices": {
+      "2026-07-23": 1219.699951171875
+    },
+    "was_below": false
+  },
+  "CUPRUM": {
+    "prices": {
+      "2026-07-23": 94.80000305175781
+    },
+    "was_below": false
+  },
+  "PROVIDA": {
+    "prices": {
+      "2026-07-23": 4850.0
+    },
+    "was_below": false
+  },
+  "PLANVITAL": {
+    "prices": {
+      "2026-07-23": 260.5
+    },
+    "was_below": false
+  },
+  "SK": {
+    "prices": {
+      "2026-07-23": 1611.9
+    },
+    "was_below": false
+  },
+  "CAMANCHACA": {
+    "prices": {
+      "2026-07-23": 73.5
+    },
+    "was_below": false
+  },
+  "ALMENDRAL": {
+    "prices": {
+      "2026-07-23": 26.040000915527344
+    },
+    "was_below": false
+  },
+  "ENELGXCH": {
+    "prices": {
+      "2026-07-23": 559.3300170898438
+    },
+    "was_below": false
+  },
+  "WATTS": {
+    "prices": {
+      "2026-07-23": 718.0
+    },
+    "was_below": false
+  },
+  "CRISTALES": {
+    "prices": {
+      "2026-07-23": 2050.0
+    },
+    "was_below": false
+  },
+  "BESALCO": {
+    "prices": {
+      "2026-07-23": 1189.0
+    },
+    "was_below": false
+  },
+  "PUCOBRE": {
+    "prices": {
+      "2026-07-23": 15920.0
+    },
+    "was_below": false
+  },
+  "LIPIGAS": {
+    "prices": {
+      "2026-07-23": 8400.0
+    },
+    "was_below": false
+  },
+  "BLUMAR": {
+    "prices": {
+      "2026-07-23": 275.05
+    },
+    "was_below": false
+  },
+  "ORO-BLANCO": {
+    "prices": {
+      "2026-07-23": 10.300000190734863
+    },
+    "was_below": false
+  },
+  "AAISA": {
+    "prices": {
+      "2026-07-23": 472.0
+    },
+    "was_below": false
+  }
+}
