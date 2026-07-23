@@ -16,7 +16,7 @@ import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from data_source import get_quotes, get_daily_avg
+from data_source import get_quotes, get_daily_avg, get_returns
 from main import TICKERS
 
 app = Flask(__name__)
@@ -73,13 +73,23 @@ def quotes():
     if _cache["data"] is None or (now - _cache["ts"]) > CACHE_TTL_SECONDS:
         prices = get_quotes(TICKERS)
         avgs = get_daily_avg(TICKERS)
+        rets = get_returns(TICKERS)
         data = {}
         for t in TICKERS:
             if t in prices:
+                p = prices[t]
+                volume = p.get("volume")
+                monto_transado = (volume * p["price"]) if volume else None
                 data[t] = {
-                    "price": prices[t]["price"],
+                    "price": p["price"],
                     "avg": avgs.get(t),
-                    "timestamp": prices[t]["timestamp"],
+                    "timestamp": p["timestamp"],
+                    "dayHigh": p.get("dayHigh"),
+                    "dayLow": p.get("dayLow"),
+                    "volume": volume,
+                    "montoTransado": monto_transado,
+                    "ret3m": rets.get(t, {}).get("ret_3m"),
+                    "ret1y": rets.get(t, {}).get("ret_1y"),
                 }
         _cache["data"] = data
         _cache["ts"] = now
