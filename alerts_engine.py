@@ -15,7 +15,7 @@ import os
 from datetime import datetime, timedelta
 
 HISTORY_FILE = os.environ.get("HISTORY_FILE", "price_history.json")
-ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", 0.98))  # 2% bajo el promedio
+ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", 0.96))  # 4% bajo el promedio
 HISTORY_DAYS = int(os.environ.get("HISTORY_DAYS", 90))
 
 
