@@ -1,6 +1,7 @@
 yfinance
 pywebpush
 flask
+flask-cors
 python-dotenv
 requests
 feedparser
