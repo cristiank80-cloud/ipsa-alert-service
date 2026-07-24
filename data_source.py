@@ -151,3 +151,37 @@ def get_daily_avg(tickers, days=90):
         except Exception as e:
             print(f"[data_source] Error obteniendo promedio 90d de {t}: {e}")
     return avgs
+
+
+def get_bid_ask(tickers):
+    """
+    Puntas REALES de compra/venta (bid/ask), via Ticker.info -- esto es
+    mas lento y pesado que fast_info (hace un scrape completo por cada
+    ticker), por eso server.py lo cachea por mas tiempo que el precio.
+
+    HONESTIDAD: Yahoo Finance no siempre tiene bid/ask disponible para
+    acciones de la Bolsa de Santiago -- para varias probablemente venga
+    vacio (None). Cuando eso pase, hay que mostrar "no disponible" en
+    la app, nunca inventar un numero.
+    """
+    resultado = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t + SUFFIX).info
+            bid = info.get("bid")
+            ask = info.get("ask")
+            bid_size = info.get("bidSize")
+            ask_size = info.get("askSize")
+            # Yahoo a veces devuelve 0 en vez de None cuando no tiene el dato --
+            # tratamos 0 como "no disponible" tambien, para no mostrar un
+            # precio de $0 que confundiria mas que ayudaria.
+            resultado[t] = {
+                "bid": float(bid) if bid else None,
+                "ask": float(ask) if ask else None,
+                "bidSize": int(bid_size) if bid_size else None,
+                "askSize": int(ask_size) if ask_size else None,
+            }
+        except Exception as e:
+            print(f"[data_source] Error obteniendo bid/ask de {t}: {e}")
+            resultado[t] = {"bid": None, "ask": None, "bidSize": None, "askSize": None}
+    return resultado

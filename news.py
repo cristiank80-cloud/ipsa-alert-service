@@ -76,36 +76,52 @@ def get_recent_news(ticker, hours=48, max_items=3):
     horas. Lista vacía si no encuentra nada o si falla la búsqueda
     (nunca lanza excepción hacia afuera, para no romper el ciclo de
     alertas por un problema de red en esta parte secundaria).
+
+    Busca en dos frentes -- prensa general (Google News, que incluye
+    Diario Financiero, La Tercera Pulso, Emol, Bloomberg Línea, etc.) y
+    específicamente "hecho esencial" (comunicados oficiales a la CMF,
+    cuando algún medio los reporta). No tengo acceso automatizado
+    directo al formulario de Hechos Esenciales de la CMF (no es una API
+    pública, es un formulario web) -- esto es lo más cercano sin
+    inventar una fuente que no existe.
     """
-    query = NEWS_QUERY.get(ticker, ticker)
-    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=es-419&gl=CL&ceid=CL:es-419"
+    query_empresa = NEWS_QUERY.get(ticker, ticker)
+    consultas = [
+        query_empresa,
+        f"{query_empresa} hecho esencial",
+    ]
 
-    try:
-        feed = feedparser.parse(url)
-    except Exception as e:
-        print(f"[news] Error consultando noticias para {ticker}: {e}")
-        return []
-
-    if not feed.entries:
-        return []
-
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     resultados = []
-
-    for entry in feed.entries:
+    vistos = set()
+    for query in consultas:
+        url = f"https://news.google.com/rss/search?q={quote(query)}&hl=es-419&gl=CL&ceid=CL:es-419"
         try:
-            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        except Exception:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            print(f"[news] Error consultando noticias para {ticker} ({query}): {e}")
             continue
-        if published < cutoff:
+
+        if not feed.entries:
             continue
-        resultados.append({
-            "title": entry.title,
-            "link": entry.link,
-            "published": published.isoformat(),
-        })
-        if len(resultados) >= max_items:
-            break
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        for entry in feed.entries:
+            try:
+                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if published < cutoff:
+                continue
+            if entry.link in vistos:
+                continue
+            vistos.add(entry.link)
+            resultados.append({
+                "title": entry.title,
+                "link": entry.link,
+                "published": published.isoformat(),
+            })
+            if len(resultados) >= max_items:
+                return resultados
 
     return resultados
 
