@@ -305,10 +305,21 @@ def enviar_push(payload_dict):
             vivas.append(sub)
         except WebPushException as e:
             codigo = getattr(getattr(e, "response", None), "status_code", None)
+            cuerpo = ""
+            try:
+                cuerpo = e.response.text or ""
+            except Exception:
+                pass
             fallidos += 1
-            if codigo in (404, 410):
-                detalle.append(f"suscripcion vencida ({codigo}), eliminada")
-                print(f"[notify] Suscripcion vencida ({codigo}); se elimina.")
+            # 404/410: la suscripcion ya no existe (PWA desinstalada, etc.)
+            # VapidPkHashMismatch: la suscripcion se creo con una clave
+            # publica VAPID distinta a la actual (por ejemplo, quedo de
+            # antes de rotar la clave). En ambos casos ya no sirve.
+            vencida = codigo in (404, 410) or "VapidPkHashMismatch" in cuerpo
+            if vencida:
+                motivo = f"{codigo}" if codigo in (404, 410) else "VapidPkHashMismatch"
+                detalle.append(f"suscripcion vencida ({motivo}), eliminada")
+                print(f"[notify] Suscripcion vencida ({motivo}); se elimina.")
             else:
                 vivas.append(sub)
                 detalle.append(f"error {codigo}: {e}")
