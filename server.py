@@ -239,8 +239,14 @@ def run_check():
             noticias = news.get_recent_news(t)
             mensaje_extra = indic_texto + "\n\n" + news.describe(noticias)
 
-            notify.send_email_alert(t, price, avg, pct_below, mensaje_extra)
-            notify.send_push_alert(t, price, avg, pct_below, indic_texto)
+            try:
+                notify.send_email_alert(t, price, avg, pct_below, mensaje_extra)
+            except Exception as e:
+                print(f"[run-check] Error enviando correo para {t}: {e}")
+            try:
+                notify.send_push_alert(t, price, avg, pct_below, indic_texto)
+            except Exception as e:
+                print(f"[run-check] Error enviando push para {t}: {e}")
             alertadas.append({"ticker": t, "price": price, "avg": avg, "pct_below": round(pct_below, 1)})
 
     return jsonify({
