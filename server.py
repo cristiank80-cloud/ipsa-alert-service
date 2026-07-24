@@ -256,6 +256,44 @@ def run_check():
     })
 
 
+@app.route("/push-debug", methods=["GET"])
+def push_debug():
+    """
+    Radiografia de la configuracion de push, para revisar desde el
+    navegador. Reemplaza al Shell de Render (que es de pago) para
+    diagnosticar sin adivinar. NO muestra el valor de la clave privada.
+
+    Uso: /push-debug?token=TU_CHECK_SECRET
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    return jsonify(notify.vapid_diagnostico())
+
+
+@app.route("/push-test", methods=["GET", "POST"])
+def push_test():
+    """
+    Manda un push de prueba inmediato a todos los dispositivos suscritos,
+    sin esperar a que alguna accion cruce el umbral.
+
+    Uso: /push-test?token=TU_CHECK_SECRET
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+
+    enviados, fallidos, detalle = notify.enviar_push({
+        "title": "IPSA Monitor",
+        "body": "Prueba de notificacion: el push quedo funcionando.",
+        "ticker": "test",
+    })
+    return jsonify({
+        "enviados": enviados,
+        "fallidos": fallidos,
+        "detalle": detalle,
+        "suscripciones": len(notify._load_subscriptions()),
+    })
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "alive"})
