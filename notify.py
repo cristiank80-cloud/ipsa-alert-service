@@ -1,27 +1,28 @@
 """
 Envio de alertas por dos canales:
-  - Correo, via SMTP (funciona con Gmail usando una "contraseña de
-    aplicacion", no tu clave normal).
+  - Correo, via la API de Resend (HTTPS, no SMTP -- Render y varios
+    hostings gratuitos bloquean el puerto SMTP saliente, por eso se
+    migró de smtplib a esto).
   - Push al celular, via Web Push (VAPID) hacia la PWA instalada.
 """
 import os
 import json
-import smtplib
-from email.mime.text import MIMEText
+import requests
 
 from pywebpush import webpush, WebPushException
 
-# ---- Correo ----
-EMAIL_FROM = os.environ.get("EMAIL_FROM")
-EMAIL_APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD")
+# ---- Correo (API de Resend) ----
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+# El remitente "sandbox" de Resend no requiere verificar un dominio,
+# pero SOLO puede mandar al correo con el que te registraste en Resend
+# -- que es justo tu caso, te mandas las alertas a ti mismo.
+RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
 EMAIL_TO = os.environ.get("EMAIL_TO")
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 
 def send_email_alert(ticker, price, avg, pct_below, indicadores_texto=None):
-    if not (EMAIL_FROM and EMAIL_APP_PASSWORD and EMAIL_TO):
-        print("[notify] Correo no configurado, se omite envío.")
+    if not (RESEND_API_KEY and EMAIL_TO):
+        print("[notify] Correo no configurado (falta RESEND_API_KEY o EMAIL_TO), se omite envío.")
         return
 
     subject = f"⚠️ {ticker} cayó {pct_below:.1f}% bajo su promedio"
@@ -32,19 +33,28 @@ def send_email_alert(ticker, price, avg, pct_below, indicadores_texto=None):
     if indicadores_texto:
         body += f"Indicadores técnicos: {indicadores_texto}\n\n"
     body += "Revisa la app para más detalle antes de decidir."
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
-            server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
-        print(f"[notify] Correo enviado para {ticker}")
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": RESEND_FROM,
+                "to": [EMAIL_TO],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            print(f"[notify] Resend rechazó el correo ({resp.status_code}): {resp.text}")
+        else:
+            print(f"[notify] Correo enviado para {ticker} (vía Resend)")
     except Exception as e:
-        print(f"[notify] Error enviando correo: {e}")
+        print(f"[notify] Error enviando correo vía Resend: {e}")
 
 
 # ---- Push web (VAPID) ----
