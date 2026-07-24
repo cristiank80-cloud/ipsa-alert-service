@@ -85,6 +85,54 @@ def get_returns(tickers):
     return rets
 
 
+def get_index_quote():
+    """
+    Valor REAL del índice IPSA (no una acción individual), directo de
+    Yahoo Finance. El ticker del índice es '^IPSA' (con acento circunflejo,
+    no lleva sufijo .SN como las acciones individuales).
+    """
+    try:
+        info = yf.Ticker("^IPSA").fast_info
+        price = info.get("lastPrice") if hasattr(info, "get") else getattr(info, "last_price", None)
+        prev_close = info.get("previousClose") if hasattr(info, "get") else getattr(info, "previous_close", None)
+        if price is None:
+            return None
+        return {
+            "value": float(price),
+            "previousClose": float(prev_close) if prev_close else None,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        print(f"[data_source] Error obteniendo el índice IPSA: {e}")
+        return None
+
+
+def get_price_history(ticker, period="3mo"):
+    """
+    Serie de precios de cierre y volumen reales para un ticker, para el
+    selector de rango de período del gráfico (1D, 5D, 1M, 3M, 6M, YTD,
+    1A, 5Y) y para el subgráfico de volumen.
+    'period' usa la sintaxis de yfinance: 1d,5d,1mo,3mo,6mo,ytd,1y,5y.
+    """
+    try:
+        hist = yf.Ticker(ticker + SUFFIX).history(period=period)
+        hist = hist.dropna(subset=["Close"])
+        if hist.empty:
+            return []
+        puntos = []
+        for idx, row in hist.iterrows():
+            vol = row.get("Volume")
+            puntos.append({
+                "date": idx.strftime("%Y-%m-%d"),
+                "close": float(row["Close"]),
+                "volume": (float(vol) if vol == vol and vol is not None else None),  # vol==vol descarta NaN
+            })
+        return puntos
+    except Exception as e:
+        print(f"[data_source] Error obteniendo historial de {ticker} ({period}): {e}")
+        return []
+
+
 def get_daily_avg(tickers, days=90):
     """
     Promedio real de cierre de los ultimos `days` dias, calculado
