@@ -1,0 +1,18 @@
+flask
+flask-cors
+gunicorn
+requests
+pywebpush
+feedparser
+python-dotenv
+
+# yfinance SE SACO A PROPOSITO.
+#
+# El nuevo data_source.py habla directo con el endpoint "chart" de Yahoo
+# usando requests, que ya estaba en la lista. yfinance arrastraba pandas,
+# numpy y varias dependencias mas: sacarlo hace que el despliegue en Render
+# sea mucho mas rapido y que el servicio arranque antes -- importante en el
+# plan gratuito, donde el servidor se duerme y hay que esperar a que
+# despierte.
+#
+# Si en algun momento vuelves a usar yfinance, agregalo de nuevo aqui.

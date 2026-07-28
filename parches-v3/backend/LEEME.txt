@@ -1,0 +1,31 @@
+QUE ARCHIVO VA DONDE
+====================
+
+Copia estos 4 a tu carpeta backend/:
+
+  data_source.py   REEMPLAZA al actual   -> cotizacion en vivo + hora real de bolsa
+  server.py        REEMPLAZA al actual   -> fallo ruidoso, /diag, /signals, resumen diario
+  notify.py        REEMPLAZA al actual   -> identico al tuyo, mas send_raw_email()
+  signals.py       NUEVO                 -> capa de senales con reglas explicitas
+
+Los otros archivos de esta carpeta (main.py, news.py, indicators.py,
+alerts_engine.py, requirements.txt) van incluidos SIN CAMBIOS, solo para
+que tengas el backend completo en un mismo lugar. Puedes ignorarlos.
+
+La carpeta __pycache__ es basura de la verificacion de sintaxis que corri;
+borrala, no sirve para nada.
+
+NOTA sobre requirements.txt: data_source.py ya no usa yfinance (ahora habla
+directo con el endpoint chart de Yahoo via requests, que es mucho mas
+liviano). Puedes sacar yfinance de la lista o dejarlo, da lo mismo.
+
+DESPUES DE DESPLEGAR, verifica en este orden:
+
+  /diag?token=TU_SECRET     -> suscripciones_push >= 1, indice.disponible = true
+  /email-test?token=...     -> te debe llegar un correo
+  /push-test?token=...      -> te debe llegar una notificacion al celular
+  /signals                  -> el ranking con sus razones y banderas rojas
+
+Y agrega al cron una llamada diaria a /resumen-diario?token=... despues del
+cierre. Ese correo llega TODOS los dias habiles, haya o no alertas: si un
+dia no llega, sabes que algo se rompio.
