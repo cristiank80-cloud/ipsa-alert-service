@@ -83,6 +83,37 @@ def send_email_alert(ticker, price, avg, pct_below, indicadores_texto=None):
         print(f"[notify] Error enviando correo via Resend: {e}")
 
 
+def send_raw_email(subject, body):
+    """
+    Correo libre (asunto + texto), sin el formato de alerta de una accion.
+    Lo usan el resumen diario y las alarmas de servicio caido.
+
+    Faltaba: send_email_alert() obligaba a pasar ticker/precio/promedio, asi
+    que no habia forma de mandar un mensaje del sistema. Por eso el servicio
+    no tenia como avisarte que se habia quedado sin datos.
+    """
+    if not (RESEND_API_KEY and EMAIL_TO):
+        print("[notify] Correo no configurado (falta RESEND_API_KEY o EMAIL_TO).")
+        return False
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"from": RESEND_FROM, "to": [EMAIL_TO],
+                  "subject": subject, "text": body},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            print(f"[notify] Resend rechazo el correo ({resp.status_code}): {resp.text}")
+            return False
+        print(f"[notify] Correo enviado: {subject}")
+        return True
+    except Exception as e:
+        print(f"[notify] Error enviando correo via Resend: {e}")
+        return False
+
+
 # ---- Push web (VAPID) ----
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
 VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:tu_correo@gmail.com")

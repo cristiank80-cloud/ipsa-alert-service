@@ -1,270 +1,572 @@
 """
-Servidor (Flask) con estas funciones:
-  - Recibir la suscripción push que genera la PWA en el celular
-    (endpoint /subscribe).
-  - Entregar datos reales de precios a la PWA (endpoint /quotes).
-  - Entregar historial real por periodo (endpoint /history).
-  - /run-check: hace el chequeo de las 47 acciones y manda alertas por
-    correo/push. Reemplaza a GitHub Actions como "reloj" -- el cron de
-    GitHub Actions demostró no ser confiable (llegó a saltarse horas
-    completas en vez de correr cada 10 min). Un servicio externo de
-    cron (ver DEPLOY.md) llama a este endpoint cada 10 minutos.
-  - /health para verificar que el servicio sigue vivo.
+Servidor v3 (Flask).
 
-CORS: la PWA se sirve desde un dominio distinto (github.io) al de este
-servidor (onrender.com) -- sin habilitar CORS explícitamente, el
-navegador bloquea esas peticiones por seguridad. flask-cors lo resuelve.
+CAMBIOS RESPECTO DE LA VERSION ANTERIOR
+=======================================
+
+1) /run-check ya no puede fallar en silencio.
+   Antes, si Yahoo devolvia 429, get_quotes() retornaba {} , el bucle no
+   entraba nunca, y el endpoint respondia HTTP 200 con "checked": 0. El
+   cron externo veia un 200 y quedaba conforme. Nadie se enteraba de nada.
+   Ahora devuelve HTTP 503 y, tras varios ciclos fallidos seguidos, manda
+   un correo de alarma. Un servicio de monitoreo que vigile este endpoint
+   ahora si te va a avisar.
+
+2) Latido diario (/resumen-diario).
+   El sistema anterior solo sabia hablar cuando algo andaba mal. El
+   silencio era ambiguo: podia significar "no cruzo nada" o "todo esta
+   roto". Hoy paso lo segundo y no habia forma de distinguirlo. Ahora
+   llega un correo todos los dias habiles al cierre, aunque no haya
+   ninguna alerta. Si un dia no llega ese correo, sabes que algo se rompio.
+
+3) Las suscripciones push se guardan por endpoint, no por objeto completo.
+   El disco de Render en plan gratuito es EFIMERO: se borra en cada
+   reinicio y en cada despliegue. La app en el celular guardaba
+   "notificaciones activas" en localStorage y nunca revalidaba, asi que
+   mostraba el visto verde mientras el servidor tenia la lista vacia.
+   Ese es el motivo mas probable de que hoy no te llegara ningun push.
+   Con el parche del frontend, la PWA se re-suscribe sola cada vez que la
+   abres; aqui se deduplica por endpoint para que no se acumule basura.
+
+4) /quotes entrega la frescura real de cada dato.
+   Cada precio viaja con marketTime (hora de la bolsa) y staleSeconds. El
+   indice viaja con su propio estado: si no se pudo obtener, se dice
+   explicitamente en vez de dejar que la app muestre el valor anterior
+   como si fuera de ahora.
+
+5) /signals: la capa de senales con reglas explicitas (ver signals.py).
 """
 import os
 import json
 import time
+from datetime import datetime, timezone
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from data_source import get_quotes, get_daily_avg, get_returns, get_index_quote, get_price_history, get_bid_ask
+from data_source import get_market_data, get_stats, get_price_history
 from main import TICKERS
-import indicators
+import fuente_bolsa
 import news
 import notify
+import signals
 
 app = Flask(__name__)
-CORS(app)  # permite peticiones desde cualquier origen (la PWA en github.io)
+CORS(app)
 
 SUBSCRIPTIONS_FILE = os.environ.get("SUBSCRIPTIONS_FILE", "push_subscriptions.json")
-ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", 0.96))  # 4% bajo el promedio
-CHECK_SECRET = os.environ.get("CHECK_SECRET")  # protege /run-check de que cualquiera lo dispare
+CHECK_SECRET = os.environ.get("CHECK_SECRET")
 
-# Dos caches separados, con la razon de fondo explicada abajo:
-#
-# 1) _price_cache: precio actual + volumen + max/min del dia. Rapido de
-#    pedir (fast_info), asi que se refresca casi en cada consulta -- si
-#    el mercado esta abierto, esto es lo que hace que la app se sienta
-#    "en vivo" de verdad, no pegada a un numero viejo.
-#
-# 2) _stats_cache: promedio de 90 dias y rentabilidad 3M/1A. Esto es
-#    LENTO de calcular (pide el historial completo de cada accion), y
-#    ademas casi no cambia de un minuto a otro -- por eso se guarda por
-#    mas tiempo, para no pagar ese costo en cada consulta de la app.
-_price_cache = {"data": None, "index": None, "ts": 0}
-PRICE_CACHE_TTL_SECONDS = 45  # se refresca casi en cada poll de la PWA (cada 60s)
+# Umbral de alerta. Ahora en desviaciones estandar, no en un -4% fijo.
+# Si prefieres seguir con el porcentaje, define ALERTA_MODO=pct.
+ALERTA_MODO = os.environ.get("ALERTA_MODO", "z")          # "z" o "pct"
+ALERTA_Z = float(os.environ.get("ALERTA_Z", -1.5))
+ALERTA_PCT = float(os.environ.get("ALERT_THRESHOLD", 0.96))
 
-_stats_cache = {"avgs": None, "rets": None, "ts": 0}
-STATS_CACHE_TTL_SECONDS = 1800  # 30 minutos -- el promedio/rentabilidad no cambia en minutos
+PRICE_CACHE_TTL = int(os.environ.get("PRICE_CACHE_TTL", 45))
+STATS_CACHE_TTL = int(os.environ.get("STATS_CACHE_TTL", 1800))
 
-_bidask_cache = {"data": None, "ts": 0}
-BIDASK_CACHE_TTL_SECONDS = 180  # 3 minutos -- pedirlo es lento (scrape completo por accion)
+_price_cache = {"quotes": None, "index": None, "ts": 0, "fuente": None}
+_stats_cache = {"stats": None, "indice": None, "series": None, "ts": 0}
+_news_cache = {}
+NEWS_CACHE_TTL = 1800
+
+# Salud del servicio: lo que permite distinguir "no paso nada" de "esta roto".
+_salud = {
+    "ultimo_check_ok": None,      # epoch del ultimo /run-check con datos
+    "fallos_seguidos": 0,
+    "ultimo_error": None,
+    "alarma_enviada": False,
+    "checks_totales": 0,
+}
+FALLOS_PARA_ALARMA = int(os.environ.get("FALLOS_PARA_ALARMA", 3))
+
+
+# --------------------------------------------------------------------------
+# Cache
+# --------------------------------------------------------------------------
+
+def _refrescar_stats(forzar=False):
+    ahora = time.time()
+    if forzar or _stats_cache["stats"] is None or (ahora - _stats_cache["ts"]) > STATS_CACHE_TTL:
+        stats, indice, series = get_stats(TICKERS)
+        if stats:  # solo se pisa la cache si vino algo; si Yahoo fallo, se
+            _stats_cache.update({"stats": stats, "indice": indice,  # conserva lo viejo
+                                 "series": series, "ts": ahora})
+    return _stats_cache
+
+
+def _obtener_precios():
+    """
+    Elige la fuente de precios.
+
+    Si BOLSA_API_KEY esta definida, se usa la API oficial de la Bolsa de
+    Santiago: datos de lo que se esta transando de verdad, y con puntas de
+    compra/venta, que Yahoo no publica para el mercado chileno.
+
+    Si esa fuente no responde (cuota agotada, clave vencida, caida), cae de
+    vuelta a Yahoo automaticamente en vez de dejarte sin datos. La app
+    muestra la hora real del dato en cualquiera de los dos casos, asi que
+    siempre sabes de cuando es lo que estas viendo.
+    """
+    if fuente_bolsa.disponible():
+        quotes = fuente_bolsa.get_quotes(TICKERS)
+        if quotes:
+            return quotes, fuente_bolsa.get_index(), "bolsa_de_santiago"
+        print("[server] La API de la Bolsa no respondio; se usa Yahoo como respaldo.")
+    q, i = get_market_data(TICKERS)
+    return q, i, "yahoo"
+
+
+def _refrescar_precios(forzar=False):
+    ahora = time.time()
+    if forzar or _price_cache["quotes"] is None or (ahora - _price_cache["ts"]) > PRICE_CACHE_TTL:
+        quotes, index, fuente = _obtener_precios()
+        _price_cache["fuente"] = fuente
+        if quotes:
+            _price_cache.update({"quotes": quotes, "index": index, "ts": ahora})
+        elif _price_cache["quotes"] is not None:
+            # No se pisa con vacio: se conserva lo ultimo bueno, pero la
+            # antiguedad real viaja en cada precio, asi que la app lo sabe.
+            print("[server] get_market_data no devolvio nada; se conserva la cache anterior.")
+    return _price_cache
+
+
+# --------------------------------------------------------------------------
+# Suscripciones push
+# --------------------------------------------------------------------------
+
+def _leer_subs():
+    if os.path.exists(SUBSCRIPTIONS_FILE):
+        try:
+            with open(SUBSCRIPTIONS_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[server] Archivo de suscripciones ilegible: {e}")
+    return []
 
 
 @app.route("/subscribe", methods=["POST"])
 def subscribe():
-    sub = request.get_json()
-    if not sub:
-        return jsonify({"status": "error", "message": "sin datos"}), 400
+    """
+    Recibe (o revalida) la suscripcion push de un dispositivo.
 
-    subs = []
-    if os.path.exists(SUBSCRIPTIONS_FILE):
-        with open(SUBSCRIPTIONS_FILE) as f:
-            subs = json.load(f)
+    La PWA ahora llama esto CADA VEZ que se abre, no solo la primera. Es a
+    proposito: el disco de Render se borra en cada reinicio, y sin esto la
+    suscripcion desaparece del servidor mientras el celular sigue creyendo
+    que las notificaciones estan activas.
+    """
+    sub = request.get_json(silent=True)
+    if not sub or not sub.get("endpoint"):
+        return jsonify({"status": "error", "message": "falta el endpoint"}), 400
 
-    if sub not in subs:
-        subs.append(sub)
+    subs = _leer_subs()
+    # Deduplicar por endpoint: es el identificador unico del dispositivo.
+    # Comparar el objeto completo fallaba si cambiaba el orden de las claves.
+    subs = [s for s in subs if s.get("endpoint") != sub["endpoint"]]
+    subs.append(sub)
+
+    try:
         with open(SUBSCRIPTIONS_FILE, "w") as f:
             json.dump(subs, f, indent=2)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "suscripciones": len(subs)})
 
 
 @app.route("/subscriptions", methods=["GET"])
 def list_subscriptions():
-    """Usado por main.py (en GitHub Actions) para saber a quién avisarle por push."""
-    subs = []
-    if os.path.exists(SUBSCRIPTIONS_FILE):
-        with open(SUBSCRIPTIONS_FILE) as f:
-            subs = json.load(f)
-    return jsonify(subs)
+    return jsonify(_leer_subs())
 
+
+# --------------------------------------------------------------------------
+# Datos para la app
+# --------------------------------------------------------------------------
 
 @app.route("/quotes", methods=["GET"])
 def quotes():
-    """
-    Precios reales + promedio de 90 dias para todas las acciones, desde
-    Yahoo Finance. La PWA llama esto para mostrar datos de verdad en
-    vez de la simulacion local.
-    """
-    now = time.time()
+    st = _refrescar_stats()
+    pc = _refrescar_precios()
 
-    if _stats_cache["avgs"] is None or (now - _stats_cache["ts"]) > STATS_CACHE_TTL_SECONDS:
-        _stats_cache["avgs"] = get_daily_avg(TICKERS)
-        _stats_cache["rets"] = get_returns(TICKERS)
-        _stats_cache["ts"] = now
+    stats = st["stats"] or {}
+    quotes_raw = pc["quotes"] or {}
 
-    if _bidask_cache["data"] is None or (now - _bidask_cache["ts"]) > BIDASK_CACHE_TTL_SECONDS:
-        _bidask_cache["data"] = get_bid_ask(TICKERS)
-        _bidask_cache["ts"] = now
+    data = {}
+    for t in TICKERS:
+        q = quotes_raw.get(t)
+        if not q:
+            continue
+        s = stats.get(t, {})
+        volumen = q.get("volume")
+        data[t] = {
+            "price": q["price"],
+            "avg": s.get("avg90"),
+            # Frescura REAL, no la hora en que el servidor pidio el dato.
+            "marketTime": q.get("marketTime"),
+            "staleSeconds": q.get("staleSeconds"),
+            "fetchedAt": q.get("fetchedAt"),
+            "previousClose": q.get("previousClose"),
+            "dayHigh": q.get("dayHigh"),
+            "dayLow": q.get("dayLow"),
+            "volume": volumen,
+            "montoTransado": (volumen * q["price"]) if volumen else None,
+            "ret3m": s.get("ret3m"),
+            "ret1y": s.get("ret1y"),
+            # Indicadores calculados sobre cierres diarios reales de un ano,
+            # no sobre los ticks de 60 segundos del celular.
+            "rsi14": s.get("rsi14"),
+            "sma20": s.get("sma20"),
+            "sma50": s.get("sma50"),
+            "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
+            "volDiaria": s.get("volDiaria"),
+            "montoMedioDiario30d": s.get("montoMedioDiario30d"),
+            # Yahoo no publica puntas de la Bolsa de Santiago. Se declara
+            # explicitamente en vez de gastar 47 peticiones para mostrar
+            # "no disponible" (ver data_source.get_bid_ask).
+            # Con la API de la Bolsa estas vienen con datos; con Yahoo, en None.
+            "bid": q.get("bid"), "ask": q.get("ask"),
+            "bidSize": q.get("bidSize"), "askSize": q.get("askSize"),
+            "puntasDisponibles": bool(q.get("bid") or q.get("ask")),
+        }
 
-    if _price_cache["data"] is None or (now - _price_cache["ts"]) > PRICE_CACHE_TTL_SECONDS:
-        prices = get_quotes(TICKERS)
-        index = get_index_quote()
-        data = {}
-        for t in TICKERS:
-            if t in prices:
-                p = prices[t]
-                volume = p.get("volume")
-                monto_transado = (volume * p["price"]) if volume else None
-                ba = _bidask_cache["data"].get(t, {})
-                data[t] = {
-                    "price": p["price"],
-                    "avg": _stats_cache["avgs"].get(t),
-                    "timestamp": p["timestamp"],
-                    "dayHigh": p.get("dayHigh"),
-                    "dayLow": p.get("dayLow"),
-                    "volume": volume,
-                    "montoTransado": monto_transado,
-                    "ret3m": _stats_cache["rets"].get(t, {}).get("ret_3m"),
-                    "ret1y": _stats_cache["rets"].get(t, {}).get("ret_1y"),
-                    "bid": ba.get("bid"),
-                    "ask": ba.get("ask"),
-                    "bidSize": ba.get("bidSize"),
-                    "askSize": ba.get("askSize"),
-                }
-        _price_cache["data"] = data
-        _price_cache["index"] = index
-        _price_cache["ts"] = now
-
+    index = pc.get("index")
     return jsonify({
-        "quotes": _price_cache["data"],
-        "index": _price_cache.get("index"),
-        "cached_at": _price_cache["ts"],
-        "cache_ttl_seconds": PRICE_CACHE_TTL_SECONDS,
+        "quotes": data,
+        "index": index,
+        # Si el indice no llego, la app NO debe mostrar el valor anterior
+        # como si fuera de ahora. Este flag existe para eso.
+        "indexDisponible": index is not None,
+        "recibidos": len(data),
+        "esperados": len(TICKERS),
+        "cached_at": pc["ts"],
+        "cache_ttl_seconds": PRICE_CACHE_TTL,
+        "fuente": pc.get("fuente", "yahoo"),
+        "serverTime": datetime.now(timezone.utc).isoformat(),
     })
 
 
-# Periodos validos (sintaxis yfinance) que acepta /history
-VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y"}
-_history_cache = {}  # {(ticker, period): {"data":..., "ts":...}}
-HISTORY_CACHE_TTL = 1800  # 30 minutos -- el historial cambia poco durante el dia
-
-
-_news_cache = {}  # {ticker: {"data":..., "ts":...}}
-NEWS_CACHE_TTL = 1800  # 30 minutos -- no tiene sentido pedirla mas seguido
-
-
-@app.route("/news", methods=["GET"])
-def news_endpoint():
+@app.route("/signals", methods=["GET"])
+def signals_endpoint():
     """
-    Noticias reales recientes (Google News) para una acción, para
-    mostrar en el detalle de la PWA. Uso: /news?ticker=SQM-B
+    Ranking con reglas explicitas. NO es una lista de compras sugeridas:
+    cada item trae sus razones y sus banderas rojas para que puedas
+    descartarlo. Ver el descargo en signals.py.
     """
+    st = _refrescar_stats()
+    pc = _refrescar_precios()
+    if not pc["quotes"]:
+        return jsonify({"error": "sin precios disponibles ahora mismo"}), 503
+
+    precios = {t: q["price"] for t, q in pc["quotes"].items()}
+    resultado = signals.rankear(precios, st["stats"] or {}, st["indice"])
+    resultado["serverTime"] = datetime.now(timezone.utc).isoformat()
+    return jsonify(resultado)
+
+
+@app.route("/signal", methods=["GET"])
+def signal_uno():
     ticker = request.args.get("ticker", "").upper()
     if ticker not in TICKERS:
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+    st = _refrescar_stats()
+    pc = _refrescar_precios()
+    q = (pc["quotes"] or {}).get(ticker)
+    if not q:
+        return jsonify({"error": "sin precio disponible para esa accion"}), 503
+    return jsonify(signals.evaluar(ticker, q["price"],
+                                   (st["stats"] or {}).get(ticker), st["indice"]))
 
-    now = time.time()
-    cached = _news_cache.get(ticker)
-    if cached is None or (now - cached["ts"]) > NEWS_CACHE_TTL:
-        items = news.get_recent_news(ticker)
-        _news_cache[ticker] = {"data": items, "ts": now}
 
-    return jsonify({"ticker": ticker, "items": _news_cache[ticker]["data"]})
+VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y"}
+_history_cache = {}
+HISTORY_CACHE_TTL = 1800
 
 
 @app.route("/history", methods=["GET"])
 def history():
-    """
-    Serie de precios reales de cierre para un ticker y un periodo dado,
-    para el selector de rango del grafico (1D/5D/1M/3M/6M/YTD/1A/5Y).
-    Uso: /history?ticker=SQM-B&period=3mo
-    """
     ticker = request.args.get("ticker", "").upper()
     period = request.args.get("period", "3mo").lower()
-
-    if ticker not in TICKERS:
+    if ticker not in TICKERS and ticker not in ("IPSA", "^IPSA"):
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     if period not in VALID_PERIODS:
         return jsonify({"error": f"period debe ser uno de {sorted(VALID_PERIODS)}"}), 400
 
+    # Si la serie anual ya esta en cache, se recorta de ahi en vez de
+    # volver a pedirsela a Yahoo. Menos peticiones = menos rate limiting.
+    st = _refrescar_stats()
+    dias = {"1mo": 21, "3mo": 63, "6mo": 126, "ytd": None, "1y": 252}.get(period)
+    serie = (st.get("series") or {}).get(ticker)
+    if serie and dias and len(serie) >= dias:
+        return jsonify({"ticker": ticker, "period": period,
+                        "points": serie[-dias:], "origen": "cache"})
+
     key = (ticker, period)
-    now = time.time()
-    cached = _history_cache.get(key)
-    if cached is None or (now - cached["ts"]) > HISTORY_CACHE_TTL:
-        data = get_price_history(ticker, period)
-        _history_cache[key] = {"data": data, "ts": now}
+    ahora = time.time()
+    c = _history_cache.get(key)
+    if c is None or (ahora - c["ts"]) > HISTORY_CACHE_TTL:
+        _history_cache[key] = {"data": get_price_history(ticker, period), "ts": ahora}
+    return jsonify({"ticker": ticker, "period": period,
+                    "points": _history_cache[key]["data"], "origen": "yahoo"})
 
-    return jsonify({"ticker": ticker, "period": period, "points": _history_cache[key]["data"]})
+
+@app.route("/news", methods=["GET"])
+def news_endpoint():
+    ticker = request.args.get("ticker", "").upper()
+    if ticker not in TICKERS:
+        return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+    ahora = time.time()
+    c = _news_cache.get(ticker)
+    if c is None or (ahora - c["ts"]) > NEWS_CACHE_TTL:
+        _news_cache[ticker] = {"data": news.get_recent_news(ticker), "ts": ahora}
+    return jsonify({"ticker": ticker, "items": _news_cache[ticker]["data"]})
 
 
-# Recuerda si cada accion ya estaba bajo el umbral en el chequeo
-# anterior, para no reenviar la misma alerta en cada llamada -- vive
-# solo en memoria, se reinicia si Render reinicia el servicio (mismo
-# tipo de limite que ya conoces del plan gratuito).
+# --------------------------------------------------------------------------
+# Chequeo periodico y alertas
+# --------------------------------------------------------------------------
+
 _alert_state = {}
+
+
+def _cruzo_umbral(precio, s):
+    """True si la accion esta bajo el umbral configurado."""
+    if ALERTA_MODO == "pct":
+        avg = s.get("avg90")
+        return bool(avg) and precio < avg * ALERTA_PCT
+    z = s.get("zscore")
+    return z is not None and z <= ALERTA_Z
 
 
 @app.route("/run-check", methods=["GET", "POST"])
 def run_check():
-    """
-    Revisa las 47 acciones y manda alertas por correo/push a quien
-    cruce el umbral. Pensado para que lo llame un cron externo
-    (cron-job.org u otro) cada 10 minutos -- ver DEPLOY.md.
-    """
-    if CHECK_SECRET:
-        token = request.args.get("token")
-        if token != CHECK_SECRET:
-            return jsonify({"error": "no autorizado"}), 401
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
 
-    now = time.time()
-    if _stats_cache["avgs"] is None or (now - _stats_cache["ts"]) > STATS_CACHE_TTL_SECONDS:
-        _stats_cache["avgs"] = get_daily_avg(TICKERS)
-        _stats_cache["rets"] = get_returns(TICKERS)
-        _stats_cache["ts"] = now
+    _salud["checks_totales"] += 1
+    st = _refrescar_stats()
+    quotes, _, _fuente = _obtener_precios()
 
-    prices = get_quotes(TICKERS)
-    avgs = _stats_cache["avgs"]
+    # --- Fallo ruidoso -----------------------------------------------------
+    # Antes esto devolvia 200 con "checked": 0 y el cron quedaba conforme.
+    if not quotes:
+        _salud["fallos_seguidos"] += 1
+        _salud["ultimo_error"] = "get_market_data devolvio vacio (Yahoo 429 o caido)"
+        print(f"[run-check] SIN DATOS. Fallos seguidos: {_salud['fallos_seguidos']}")
 
+        if _salud["fallos_seguidos"] >= FALLOS_PARA_ALARMA and not _salud["alarma_enviada"]:
+            _salud["alarma_enviada"] = True
+            try:
+                notify.send_raw_email(
+                    "IPSA Monitor: el servicio dejo de recibir datos",
+                    f"Llevo {_salud['fallos_seguidos']} chequeos seguidos sin poder "
+                    f"obtener precios de Yahoo Finance.\n\n"
+                    f"Mientras esto pase NO vas a recibir alertas de caida — pero "
+                    f"tampoco significa que no este pasando nada en el mercado.\n\n"
+                    f"Ultimo chequeo con datos: {_salud['ultimo_check_ok']}\n"
+                    f"Error: {_salud['ultimo_error']}\n\n"
+                    f"Revisa /diag en el servidor.")
+            except Exception as e:
+                print(f"[run-check] No se pudo enviar la alarma: {e}")
+
+        return jsonify({
+            "estado": "sin_datos",
+            "fallos_seguidos": _salud["fallos_seguidos"],
+            "detalle": _salud["ultimo_error"],
+        }), 503
+
+    _salud["fallos_seguidos"] = 0
+    _salud["alarma_enviada"] = False
+    _salud["ultimo_check_ok"] = datetime.now(timezone.utc).isoformat()
+    _salud["ultimo_error"] = None
+
+    stats = st["stats"] or {}
     alertadas = []
+
     for t in TICKERS:
-        if t not in prices or t not in avgs or not avgs[t]:
+        q, s = quotes.get(t), stats.get(t)
+        if not q or not s:
             continue
-        price = prices[t]["price"]
-        avg = avgs[t]
-        threshold = avg * ALERT_THRESHOLD
-        is_below = price < threshold
-        crossed_now = is_below and not _alert_state.get(t, False)
-        _alert_state[t] = is_below
+        precio = q["price"]
+        bajo = _cruzo_umbral(precio, s)
+        cruzo_ahora = bajo and not _alert_state.get(t, False)
+        _alert_state[t] = bajo
+        if not cruzo_ahora:
+            continue
 
-        if crossed_now:
-            pct_below = (1 - price / avg) * 100
-            serie = [p["close"] for p in get_price_history(t, "3mo")]
-            indic_texto = indicators.describe(indicators.summarize(serie))
+        ev = signals.evaluar(t, precio, s, st["indice"])
+        pct_bajo = (1 - precio / s["avg90"]) * 100 if s.get("avg90") else 0.0
+        cuerpo = _texto_alerta(ev)
+        try:
             noticias = news.get_recent_news(t)
-            mensaje_extra = indic_texto + "\n\n" + news.describe(noticias)
+            if noticias:
+                cuerpo += "\n\n" + news.describe(noticias)
+        except Exception as e:
+            print(f"[run-check] noticias de {t}: {e}")
 
-            try:
-                notify.send_email_alert(t, price, avg, pct_below, mensaje_extra)
-            except Exception as e:
-                print(f"[run-check] Error enviando correo para {t}: {e}")
-            try:
-                notify.send_push_alert(t, price, avg, pct_below, indic_texto)
-            except Exception as e:
-                print(f"[run-check] Error enviando push para {t}: {e}")
-            alertadas.append({"ticker": t, "price": price, "avg": avg, "pct_below": round(pct_below, 1)})
+        try:
+            notify.send_email_alert(t, precio, s["avg90"], pct_bajo, cuerpo)
+        except Exception as e:
+            print(f"[run-check] correo {t}: {e}")
+        try:
+            notify.send_push_alert(t, precio, s["avg90"], pct_bajo, signals.describe(ev))
+        except Exception as e:
+            print(f"[run-check] push {t}: {e}")
+
+        alertadas.append({"ticker": t, "precio": precio,
+                          "puntaje": ev.get("puntaje") if ev else None,
+                          "banderas": len(ev.get("banderas", [])) if ev else 0})
 
     return jsonify({
-        "checked": len([t for t in TICKERS if t in prices]),
+        "estado": "ok",
+        "evaluadas": len([t for t in TICKERS if t in quotes]),
+        "esperadas": len(TICKERS),
         "alertas_disparadas": alertadas,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+
+
+def _texto_alerta(ev):
+    if not ev:
+        return ""
+    lineas = []
+    if ev.get("banderas"):
+        lineas.append("BANDERAS ROJAS:")
+        lineas += [f"  - {b}" for b in ev["banderas"]]
+        lineas.append("")
+    lineas.append("Por que aparecio:")
+    lineas += [f"  - {r}" for r in ev.get("razones", [])]
+    lineas.append("")
+    lineas.append(signals.DESCARGO)
+    return "\n".join(lineas)
+
+
+@app.route("/resumen-diario", methods=["GET", "POST"])
+def resumen_diario():
+    """
+    LATIDO. Este correo llega TODOS los dias habiles, haya o no alertas.
+
+    Es la pieza que faltaba: el sistema anterior solo hablaba cuando algo
+    cruzaba el umbral, asi que el silencio era ambiguo — podia ser "no paso
+    nada" o "esta todo roto". Con esto, si un dia no llega el resumen, ya
+    sabes que hay que revisar el servicio.
+
+    Programalo en el cron externo una vez al dia, despues del cierre.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+
+    st = _refrescar_stats(forzar=True)
+    quotes, index, _fuente = _obtener_precios()
+
+    if not quotes:
+        try:
+            notify.send_raw_email(
+                "IPSA Monitor: resumen diario SIN DATOS",
+                "No pude obtener precios hoy. El servicio esta vivo (este correo "
+                "llego), pero la fuente de datos no responde. Revisa /diag.")
+        except Exception as e:
+            print(f"[resumen] {e}")
+        return jsonify({"estado": "sin_datos"}), 503
+
+    precios = {t: q["price"] for t, q in quotes.items()}
+    r = signals.rankear(precios, st["stats"] or {}, st["indice"])
+
+    lineas = [f"Resumen IPSA · {datetime.now().strftime('%d/%m/%Y')}", ""]
+    if index:
+        edad = index.get("staleSeconds")
+        lineas.append(f"IPSA: {index['value']:,.0f}"
+                      + (f" (dato de hace {edad//60} min)" if edad else ""))
+    else:
+        lineas.append("IPSA: NO DISPONIBLE hoy (Yahoo no respondio el indice).")
+    lineas.append(f"Acciones con precio: {len(quotes)} de {len(TICKERS)}")
+    lineas.append("")
+
+    def _bloque(titulo, items):
+        out = [titulo]
+        if not items:
+            out.append("  (ninguna cumple los criterios hoy)")
+        for e in items[:5]:
+            out.append(f"  {e['ticker']}: {e['precio']:,.0f} · puntaje {e['puntaje']:+.0f} "
+                       f"· z {e['zscore']:+.1f} · RSI {e['rsi14']}")
+            for b in e.get("banderas", []):
+                out.append(f"      ! {b.split('—')[0].strip()}")
+        out.append("")
+        return out
+
+    lineas += _bloque("Mas lejos bajo su promedio (revisar, NO comprar a ciegas):",
+                      r["candidatos_compra"])
+    lineas += _bloque("Mas estiradas sobre su promedio:", r["candidatos_venta"])
+    if r["filtradas_por_liquidez"]:
+        lineas.append(f"({r['filtradas_por_liquidez']} acciones quedaron fuera del "
+                      f"ranking por transar muy poco al dia.)")
+        lineas.append("")
+    lineas.append(signals.DESCARGO)
+
+    texto = "\n".join(lineas)
+    try:
+        notify.send_raw_email("IPSA Monitor · resumen del dia", texto)
+    except Exception as e:
+        print(f"[resumen] no se pudo enviar: {e}")
+        return jsonify({"estado": "error_envio", "detalle": str(e)}), 500
+
+    return jsonify({"estado": "enviado", "texto": texto})
+
+
+# --------------------------------------------------------------------------
+# Diagnostico
+# --------------------------------------------------------------------------
+
+@app.route("/diag", methods=["GET"])
+def diag():
+    """Todo lo que necesitas para saber si esto esta sano, en una pantalla."""
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+
+    pc = _price_cache
+    index = pc.get("index")
+    return jsonify({
+        "salud": _salud,
+        "precios_en_cache": len(pc.get("quotes") or {}),
+        "precios_esperados": len(TICKERS),
+        "edad_cache_precios_seg": int(time.time() - pc["ts"]) if pc["ts"] else None,
+        "indice": {
+            "disponible": index is not None,
+            "valor": index.get("value") if index else None,
+            "hora_bolsa": index.get("marketTime") if index else None,
+            "antiguedad_seg": index.get("staleSeconds") if index else None,
+        },
+        "stats_en_cache": len(_stats_cache.get("stats") or {}),
+        "edad_cache_stats_seg": int(time.time() - _stats_cache["ts"]) if _stats_cache["ts"] else None,
+        "suscripciones_push": len(_leer_subs()),
+        "aviso_disco": ("El disco de Render en plan gratuito es EFIMERO: las "
+                        "suscripciones se borran en cada reinicio y despliegue. "
+                        "Si este numero es 0, abre la PWA en el celular y se "
+                        "vuelve a registrar sola."),
+        "push": notify.vapid_diagnostico(),
+        "correo_configurado": bool(os.environ.get("RESEND_API_KEY")
+                                   and os.environ.get("EMAIL_TO")),
+        "modo_alerta": ALERTA_MODO,
+        "umbral": ALERTA_Z if ALERTA_MODO == "z" else ALERTA_PCT,
+        "fuente_de_precios": pc.get("fuente", "(aun sin consultar)"),
+        "bolsa_de_santiago": fuente_bolsa.diagnostico(),
+    })
+
+
+@app.route("/diag-bolsa", methods=["GET"])
+def diag_bolsa():
+    """
+    Respuesta cruda de la API de la Bolsa de Santiago. Usalo la primera vez
+    que configures BOLSA_API_KEY, para ver como se llaman de verdad los
+    campos y ajustar _MAPA_CAMPOS en fuente_bolsa.py si algo no calza.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    return jsonify(fuente_bolsa.diagnostico())
 
 
 @app.route("/push-debug", methods=["GET"])
 def push_debug():
-    """
-    Radiografia de la configuracion de push, para revisar desde el
-    navegador. Reemplaza al Shell de Render (que es de pago) para
-    diagnosticar sin adivinar. NO muestra el valor de la clave privada.
-
-    Uso: /push-debug?token=TU_CHECK_SECRET
-    """
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
         return jsonify({"error": "no autorizado"}), 401
     return jsonify(notify.vapid_diagnostico())
@@ -272,26 +574,29 @@ def push_debug():
 
 @app.route("/push-test", methods=["GET", "POST"])
 def push_test():
-    """
-    Manda un push de prueba inmediato a todos los dispositivos suscritos,
-    sin esperar a que alguna accion cruce el umbral.
-
-    Uso: /push-test?token=TU_CHECK_SECRET
-    """
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
         return jsonify({"error": "no autorizado"}), 401
-
     enviados, fallidos, detalle = notify.enviar_push({
         "title": "IPSA Monitor",
         "body": "Prueba de notificacion: el push quedo funcionando.",
         "ticker": "test",
     })
-    return jsonify({
-        "enviados": enviados,
-        "fallidos": fallidos,
-        "detalle": detalle,
-        "suscripciones": len(notify._load_subscriptions()),
-    })
+    return jsonify({"enviados": enviados, "fallidos": fallidos,
+                    "detalle": detalle, "suscripciones": len(_leer_subs())})
+
+
+@app.route("/email-test", methods=["GET", "POST"])
+def email_test():
+    """Faltaba el equivalente de /push-test para el correo."""
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    try:
+        ok = notify.send_raw_email(
+            "IPSA Monitor: prueba de correo",
+            "Si estas leyendo esto, el canal de correo funciona.")
+        return jsonify({"enviado": bool(ok)})
+    except Exception as e:
+        return jsonify({"enviado": False, "error": str(e)}), 500
 
 
 @app.route("/health")
