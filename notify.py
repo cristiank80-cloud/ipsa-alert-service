@@ -45,20 +45,45 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
 EMAIL_TO = os.environ.get("EMAIL_TO")
 
+# URL publica de la PWA (GitHub Pages). Se usa para armar el enlace "toca
+# para ver el detalle" en el correo y en el push -- antes ninguno de los
+# dos avisos llevaba a ningun lado en particular, solo abrian la app en la
+# pantalla principal.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://cristiank80-cloud.github.io/ipsa-app/")
 
-def send_email_alert(ticker, price, avg, pct_below, indicadores_texto=None):
+
+def send_alert(ticker, direccion, precio, avg, cuerpo=None):
+    """
+    Correo de alerta BIDIRECCIONAL: 'compra' cuando el precio esta lejos
+    bajo su propio promedio, 'venta' cuando esta lejos por arriba.
+
+    Reemplaza al viejo send_email_alert(), que solo sabia avisar caidas
+    (el nombre y el asunto decian "cayo" incluso conceptualmente para
+    cualquier alerta). Ahora el texto se arma segun la direccion real de
+    la senal, y siempre incluye un enlace directo a la tarjeta de esa
+    accion en la app -- antes habia que ir a buscarla a mano entre 47.
+    """
     if not (RESEND_API_KEY and EMAIL_TO):
         print("[notify] Correo no configurado (falta RESEND_API_KEY o EMAIL_TO), se omite envio.")
         return
 
-    subject = f"⚠️ {ticker} cayó {pct_below:.1f}% bajo su promedio"
-    body = (
-        f"{ticker} está en {price:,.0f}, un {pct_below:.1f}% bajo su promedio "
-        f"histórico de 90 días ({avg:,.0f}).\n\n"
-    )
-    if indicadores_texto:
-        body += f"Indicadores técnicos: {indicadores_texto}\n\n"
-    body += "Revisa la app para más detalle antes de decidir."
+    if direccion == "venta":
+        emoji, palabra, prep = "📈", "posible venta", "sobre"
+    else:
+        emoji, palabra, prep = "📉", "posible compra", "bajo"
+
+    dist_txt, cuerpo_precio = "", f"{ticker} está en {precio:,.0f}"
+    if avg:
+        dist = abs((precio / avg - 1) * 100)
+        dist_txt = f" — {dist:.1f}% {prep} su promedio"
+        cuerpo_precio += f", un {dist:.1f}% {prep} su promedio histórico de 90 días ({avg:,.0f})"
+    cuerpo_precio += "."
+
+    subject = f"{emoji} {ticker}: {palabra}{dist_txt}"
+    body = cuerpo_precio + "\n\n"
+    if cuerpo:
+        body += cuerpo + "\n\n"
+    body += f"👉 Toca aquí para ver el detalle en la app:\n{FRONTEND_URL}?ticker={ticker}"
 
     try:
         resp = requests.post(
@@ -367,14 +392,28 @@ def enviar_push(payload_dict):
     return enviados, fallidos, detalle
 
 
-def send_push_alert(ticker, price, avg, pct_below, indicadores_texto=None):
-    title = f"{ticker} bajo su promedio"
-    body = f"{price:,.0f} ({pct_below:.1f}% bajo el promedio de {avg:,.0f})"
+def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None):
+    """
+    Push BIDIRECCIONAL (ver send_alert). Incluye una 'url' en el payload:
+    sw.js la usa en notificationclick para abrir la app directo en la
+    tarjeta de esa accion, en vez de solo enfocar la pantalla principal.
+    """
+    if direccion == "venta":
+        emoji, palabra, prep = "📈", "posible venta", "sobre"
+    else:
+        emoji, palabra, prep = "📉", "posible compra", "bajo"
+
+    title = f"{emoji} {ticker} · {palabra}"
+    body = f"{precio:,.0f}"
+    if avg:
+        dist = abs((precio / avg - 1) * 100)
+        body += f" ({dist:.1f}% {prep} su promedio de {avg:,.0f})"
     if indicadores_texto:
         body += f" · {indicadores_texto}"
 
+    url = f"{FRONTEND_URL}?ticker={ticker}"
     enviados, fallidos, _ = enviar_push(
-        {"title": title, "body": body, "ticker": ticker}
+        {"title": title, "body": body, "ticker": ticker, "url": url}
     )
     if enviados:
         print(f"[notify] Push enviado para {ticker} a {enviados} dispositivo(s).")

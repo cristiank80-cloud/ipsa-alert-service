@@ -57,12 +57,6 @@ CORS(app)
 SUBSCRIPTIONS_FILE = os.environ.get("SUBSCRIPTIONS_FILE", "push_subscriptions.json")
 CHECK_SECRET = os.environ.get("CHECK_SECRET")
 
-# Umbral de alerta. Ahora en desviaciones estandar, no en un -4% fijo.
-# Si prefieres seguir con el porcentaje, define ALERTA_MODO=pct.
-ALERTA_MODO = os.environ.get("ALERTA_MODO", "z")          # "z" o "pct"
-ALERTA_Z = float(os.environ.get("ALERTA_Z", -1.5))
-ALERTA_PCT = float(os.environ.get("ALERT_THRESHOLD", 0.96))
-
 PRICE_CACHE_TTL = int(os.environ.get("PRICE_CACHE_TTL", 45))
 STATS_CACHE_TTL = int(os.environ.get("STATS_CACHE_TTL", 1800))
 
@@ -329,13 +323,24 @@ def news_endpoint():
 _alert_state = {}
 
 
-def _cruzo_umbral(precio, s):
-    """True si la accion esta bajo el umbral configurado."""
-    if ALERTA_MODO == "pct":
-        avg = s.get("avg90")
-        return bool(avg) and precio < avg * ALERTA_PCT
-    z = s.get("zscore")
-    return z is not None and z <= ALERTA_Z
+def _direccion_senal(ev):
+    """
+    'compra', 'venta' o None, segun el puntaje de signals.evaluar().
+
+    Antes esto era un umbral aparte (-4% fijo, despues z <= -1.5) que solo
+    miraba caidas. Ahora usa el MISMO corte que ya arma candidatos_compra/
+    candidatos_venta en signals.rankear() (|puntaje| >= 20): lo que dispara
+    el correo y el push es exactamente lo que el panel "Analisis del
+    momento" de la app ya te muestra, en vez de una regla aparte que podia
+    quedar desincronizada.
+    """
+    if not ev or ev.get("puntaje") is None:
+        return None
+    if ev["puntaje"] >= 20:
+        return "compra"
+    if ev["puntaje"] <= -20:
+        return "venta"
+    return None
 
 
 @app.route("/run-check", methods=["GET", "POST"])
@@ -361,7 +366,7 @@ def run_check():
                     "IPSA Monitor: el servicio dejo de recibir datos",
                     f"Llevo {_salud['fallos_seguidos']} chequeos seguidos sin poder "
                     f"obtener precios de Yahoo Finance.\n\n"
-                    f"Mientras esto pase NO vas a recibir alertas de caida — pero "
+                    f"Mientras esto pase NO vas a recibir alertas — pero "
                     f"tampoco significa que no este pasando nada en el mercado.\n\n"
                     f"Ultimo chequeo con datos: {_salud['ultimo_check_ok']}\n"
                     f"Error: {_salud['ultimo_error']}\n\n"
@@ -388,14 +393,15 @@ def run_check():
         if not q or not s:
             continue
         precio = q["price"]
-        bajo = _cruzo_umbral(precio, s)
-        cruzo_ahora = bajo and not _alert_state.get(t, False)
-        _alert_state[t] = bajo
-        if not cruzo_ahora:
+        ev = signals.evaluar(t, precio, s, st["indice"])
+        direccion = _direccion_senal(ev)
+        anterior = _alert_state.get(t)
+        _alert_state[t] = direccion
+        # Solo avisa al ENTRAR a una direccion nueva (compra o venta), no en
+        # cada chequeo mientras se mantenga ahi, y no si vuelve a "neutro".
+        if not direccion or direccion == anterior:
             continue
 
-        ev = signals.evaluar(t, precio, s, st["indice"])
-        pct_bajo = (1 - precio / s["avg90"]) * 100 if s.get("avg90") else 0.0
         cuerpo = _texto_alerta(ev)
         try:
             noticias = news.get_recent_news(t)
@@ -405,15 +411,15 @@ def run_check():
             print(f"[run-check] noticias de {t}: {e}")
 
         try:
-            notify.send_email_alert(t, precio, s["avg90"], pct_bajo, cuerpo)
+            notify.send_alert(t, direccion, precio, s.get("avg90"), cuerpo)
         except Exception as e:
             print(f"[run-check] correo {t}: {e}")
         try:
-            notify.send_push_alert(t, precio, s["avg90"], pct_bajo, signals.describe(ev))
+            notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev))
         except Exception as e:
             print(f"[run-check] push {t}: {e}")
 
-        alertadas.append({"ticker": t, "precio": precio,
+        alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
                           "puntaje": ev.get("puntaje") if ev else None,
                           "banderas": len(ev.get("banderas", [])) if ev else 0})
 
@@ -546,8 +552,7 @@ def diag():
         "push": notify.vapid_diagnostico(),
         "correo_configurado": bool(os.environ.get("RESEND_API_KEY")
                                    and os.environ.get("EMAIL_TO")),
-        "modo_alerta": ALERTA_MODO,
-        "umbral": ALERTA_Z if ALERTA_MODO == "z" else ALERTA_PCT,
+        "modo_alerta": "compra_venta (signals.py, |puntaje| >= 20 -- mismo corte que candidatos_compra/venta)",
         "fuente_de_precios": pc.get("fuente", "(aun sin consultar)"),
         "bolsa_de_santiago": fuente_bolsa.diagnostico(),
     })

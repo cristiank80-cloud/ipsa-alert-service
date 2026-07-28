@@ -128,17 +128,37 @@ def _limpio(v):
 # Cotizacion intradia (precio en vivo, con hora de bolsa)
 # --------------------------------------------------------------------------
 
-def _quote_de_meta(meta):
+def _quote_de_meta(res):
     """
-    Extrae la cotizacion del bloque `meta` del chart API. Aqui vive
-    `regularMarketPrice`, que SI es el precio en vivo (con el rezago de
-    Yahoo), a diferencia del ultimo cierre diario que devolvia fast_info.
+    Extrae la cotizacion de la respuesta del chart API (`res` es
+    `chart.result[0]` completo, no solo `meta`).
+
+    `regularMarketPrice` (en meta) SI es el precio en vivo, a diferencia del
+    ultimo cierre diario que devolvia fast_info.
+
+    OJO CON `regularMarketTime`: se detecto que para el indice ^IPSA este
+    campo de `meta` puede quedar pegado varios dias, mientras
+    `regularMarketPrice` SI se actualiza (se verifico cruzando contra
+    Visfin, que tambien usa datos de Yahoo y mostraba el mismo precio con
+    fecha de hoy). Es una inconsistencia del propio Yahoo para ese simbolo,
+    no del precio en si. Por eso aqui se usa como respaldo el ULTIMO
+    timestamp de la serie intradia (`res.timestamp`, un tick por minuto)
+    cuando es mas reciente que el de meta -- eso evita marcar como "viejo"
+    (y ahora directamente ocultar, ver frontend) un precio que en realidad
+    es el de ahora.
     """
+    meta = res.get("meta") or {}
     precio = _limpio(meta.get("regularMarketPrice"))
     if precio is None:
         return None
 
     epoch = meta.get("regularMarketTime")
+    serie_ts = res.get("timestamp") or []
+    if serie_ts:
+        ultimo_ts = serie_ts[-1]
+        if isinstance(ultimo_ts, (int, float)) and (not epoch or ultimo_ts > epoch):
+            epoch = ultimo_ts
+
     hora_bolsa, antiguedad = None, None
     if isinstance(epoch, (int, float)) and epoch > 0:
         hora_bolsa = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
@@ -186,14 +206,14 @@ def get_market_data(tickers):
         res = resultados.get(t + SUFFIX)
         if not res:
             continue
-        q = _quote_de_meta(res.get("meta") or {})
+        q = _quote_de_meta(res)
         if q:
             quotes[t] = q
 
     index = None
     res_idx = resultados.get(INDEX_SYMBOL)
     if res_idx:
-        q = _quote_de_meta(res_idx.get("meta") or {})
+        q = _quote_de_meta(res_idx)
         if q:
             index = {
                 "value": q["price"],
