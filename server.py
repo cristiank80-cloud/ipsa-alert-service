@@ -47,6 +47,7 @@ from flask_cors import CORS
 from data_source import get_market_data, get_stats, get_price_history
 from main import TICKERS
 import fuente_bolsa
+import fuente_df
 import news
 import notify
 import signals
@@ -92,7 +93,7 @@ def _refrescar_stats(forzar=False):
 
 def _obtener_precios():
     """
-    Elige la fuente de precios.
+    Elige la fuente de precios para las 47 ACCIONES.
 
     Si BOLSA_API_KEY esta definida, se usa la API oficial de la Bolsa de
     Santiago: datos de lo que se esta transando de verdad, y con puntas de
@@ -102,14 +103,25 @@ def _obtener_precios():
     vuelta a Yahoo automaticamente en vez de dejarte sin datos. La app
     muestra la hora real del dato en cualquiera de los dos casos, asi que
     siempre sabes de cuando es lo que estas viendo.
+
+    El IPSA es aparte: independiente de cual de las dos fuentes de arriba
+    se use para las acciones, el indice SIEMPRE viene de Diario Financiero
+    (fuente_df.py), nunca de Yahoo. Ver fuente_df.py para el porque.
     """
     if fuente_bolsa.disponible():
         quotes = fuente_bolsa.get_quotes(TICKERS)
         if quotes:
-            return quotes, fuente_bolsa.get_index(), "bolsa_de_santiago"
-        print("[server] La API de la Bolsa no respondio; se usa Yahoo como respaldo.")
-    q, i = get_market_data(TICKERS)
-    return q, i, "yahoo"
+            fuente = "bolsa_de_santiago"
+        else:
+            print("[server] La API de la Bolsa no respondio; se usa Yahoo como respaldo.")
+            quotes, _ = get_market_data(TICKERS)
+            fuente = "yahoo"
+    else:
+        quotes, _ = get_market_data(TICKERS)
+        fuente = "yahoo"
+
+    index = fuente_df.get_index()
+    return quotes, index, fuente
 
 
 def _refrescar_precios(forzar=False):
@@ -225,12 +237,16 @@ def quotes():
         }
 
     index = pc.get("index")
+    indicadores = fuente_df.get_uf_utm()
     return jsonify({
         "quotes": data,
         "index": index,
         # Si el indice no llego, la app NO debe mostrar el valor anterior
         # como si fuera de ahora. Este flag existe para eso.
         "indexDisponible": index is not None,
+        # UF y UTM, tambien de Diario Financiero (ver fuente_df.py).
+        "uf": indicadores.get("uf"),
+        "utm": indicadores.get("utm"),
         "recibidos": len(data),
         "esperados": len(TICKERS),
         "cached_at": pc["ts"],
@@ -443,6 +459,8 @@ def _texto_alerta(ev):
     lineas.append("Por que aparecio:")
     lineas += [f"  - {r}" for r in ev.get("razones", [])]
     lineas.append("")
+    lineas.append(signals.GLOSARIO)
+    lineas.append("")
     lineas.append(signals.DESCARGO)
     return "\n".join(lineas)
 
@@ -484,7 +502,7 @@ def resumen_diario():
         lineas.append(f"IPSA: {index['value']:,.0f}"
                       + (f" (dato de hace {edad//60} min)" if edad else ""))
     else:
-        lineas.append("IPSA: NO DISPONIBLE hoy (Yahoo no respondio el indice).")
+        lineas.append("IPSA: NO DISPONIBLE hoy (Diario Financiero no respondio).")
     lineas.append(f"Acciones con precio: {len(quotes)} de {len(TICKERS)}")
     lineas.append("")
 
@@ -507,6 +525,8 @@ def resumen_diario():
         lineas.append(f"({r['filtradas_por_liquidez']} acciones quedaron fuera del "
                       f"ranking por transar muy poco al dia.)")
         lineas.append("")
+    lineas.append(signals.GLOSARIO)
+    lineas.append("")
     lineas.append(signals.DESCARGO)
 
     texto = "\n".join(lineas)
@@ -537,11 +557,16 @@ def diag():
         "precios_esperados": len(TICKERS),
         "edad_cache_precios_seg": int(time.time() - pc["ts"]) if pc["ts"] else None,
         "indice": {
+            "fuente": "diario_financiero",
             "disponible": index is not None,
             "valor": index.get("value") if index else None,
-            "hora_bolsa": index.get("marketTime") if index else None,
+            # No es la hora de bolsa: Diario Financiero no la publica en
+            # texto plano. Es el momento en que ESTE servidor consulto la
+            # pagina -- ver fuente_df.py.
+            "hora_consulta": index.get("marketTime") if index else None,
             "antiguedad_seg": index.get("staleSeconds") if index else None,
         },
+        "uf_utm": fuente_df.get_uf_utm(),
         "stats_en_cache": len(_stats_cache.get("stats") or {}),
         "edad_cache_stats_seg": int(time.time() - _stats_cache["ts"]) if _stats_cache["ts"] else None,
         "suscripciones_push": len(_leer_subs()),

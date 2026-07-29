@@ -184,17 +184,17 @@ def _quote_de_meta(res):
 
 def get_market_data(tickers):
     """
-    Precio en vivo de todas las acciones MAS el indice IPSA, en una sola
-    tanda paralela. Devuelve (quotes, index).
+    Precio en vivo de las 47 acciones, en una sola tanda paralela.
+    Devuelve (quotes, index) por compatibilidad con quien ya desestructura
+    la tupla, pero `index` SIEMPRE es None: el IPSA ya no se pide a Yahoo
+    (^IPSA quedaba con `regularMarketTime` pegado dias enteros para ese
+    simbolo puntual; ver fuente_df.py). server.py arma el indice aparte,
+    directo desde Diario Financiero.
 
-    Que el indice viaje en la misma tanda no es un detalle: antes se pedia
-    al final, despues de ~190 peticiones, y era justo el que se comia el
-    rate limit de Yahoo. El backend devolvia index=null, el frontend se
-    quedaba mostrando el valor viejo de su cache, y el semaforo seguia
-    diciendo "datos reales 47/47" porque las acciones si habian llegado.
-    Ese fue el sintoma que viste: el IPSA congelado.
+    Sacar ^IPSA de esta tanda tambien reduce las peticiones a Yahoo de 48 a
+    47 por ciclo -- un poco menos de riesgo de que Yahoo responda 429.
     """
-    simbolos = [t + SUFFIX for t in tickers] + [INDEX_SYMBOL]
+    simbolos = [t + SUFFIX for t in tickers]
 
     def _uno(sym):
         return sym, _chart(sym, {"range": "1d", "interval": "1m"})
@@ -210,25 +210,7 @@ def get_market_data(tickers):
         if q:
             quotes[t] = q
 
-    index = None
-    res_idx = resultados.get(INDEX_SYMBOL)
-    if res_idx:
-        q = _quote_de_meta(res_idx)
-        if q:
-            index = {
-                "value": q["price"],
-                "previousClose": q["previousClose"],
-                "marketTime": q["marketTime"],
-                "staleSeconds": q["staleSeconds"],
-                "fetchedAt": q["fetchedAt"],
-            }
-    if index is None:
-        # Explicito en el log: antes esto pasaba en silencio.
-        print("[data_source] ATENCION: no se pudo obtener ^IPSA en esta tanda. "
-              "Se devuelve index=None; la app debe marcarlo como sin dato, "
-              "nunca mostrar el valor anterior como si fuera de ahora.")
-
-    return quotes, index
+    return quotes, None
 
 
 # Alias para no romper codigo que ya llamaba get_quotes()
@@ -237,7 +219,10 @@ def get_quotes(tickers):
 
 
 def get_index_quote():
-    return get_market_data([])[1]
+    # Ya no aplica: el IPSA no sale de Yahoo. Se deja el nombre para no
+    # romper un import viejo, pero devuelve None a proposito -- usa
+    # fuente_df.get_index() si necesitas el IPSA de verdad.
+    return None
 
 
 # --------------------------------------------------------------------------
