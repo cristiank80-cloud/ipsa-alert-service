@@ -409,8 +409,17 @@ def get_price_history(ticker, period="3mo"):
     rango = mapa.get(period, "3mo")
     simbolo = INDEX_SYMBOL if ticker.upper() in ("IPSA", "^IPSA") else ticker + SUFFIX
 
-    if rango == "1d":
-        res = _chart(simbolo, {"range": "1d", "interval": "5m"})
+    if rango in ("1d", "5d"):
+        # OJO: antes "5d" caia directo a _serie_diaria() -> interval=1d,
+        # es decir SOLO ~3-5 velas (una por dia). El grafico quedaba casi
+        # un segmento recto y encima todos los indicadores (SMA20, RSI14,
+        # MACD) necesitan minimo 14-26 puntos, asi que desaparecian por
+        # completo -- se veia "roto" aunque tecnicamente no fallaba nada.
+        # Se pide intradia tambien para 5 dias (velas de 15 min, ~25-30
+        # por jornada -> 100-150 puntos en total), que es lo que Yahoo
+        # permite para ese rango sin devolver error.
+        intervalo = "5m" if rango == "1d" else "15m"
+        res = _chart(simbolo, {"range": rango, "interval": intervalo})
         if not res:
             return []
         fechas = res.get("timestamp") or []
