@@ -349,8 +349,16 @@ def _direccion_senal(ev):
     el correo y el push es exactamente lo que el panel "Analisis del
     momento" de la app ya te muestra, en vez de una regla aparte que podia
     quedar desincronizada.
+
+    Excepcion: si la accion trae la bandera "CAIDA SOSTENIDA", NO se avisa
+    aunque el puntaje cruce el umbral de compra. Esa bandera ya le resta
+    puntaje en signals.evaluar(), pero no siempre alcanza para bajarla de
+    20 -- y avisar "posible compra" de algo que esta cayendo de forma
+    sostenida es justo la senal enganosa que la bandera existe para marcar.
     """
     if not ev or ev.get("puntaje") is None:
+        return None
+    if any(b.startswith("CAIDA SOSTENIDA") for b in ev.get("banderas", [])):
         return None
     if ev["puntaje"] >= 20:
         return "compra"
