@@ -467,7 +467,13 @@ def _texto_alerta(ev):
     lineas.append("Por que aparecio:")
     lineas += [f"  - {r}" for r in ev.get("razones", [])]
     lineas.append("")
-    lineas.append(signals.GLOSARIO)
+    lineas.append("CONCEPTOS CLAVE:")
+    glosario = signals.GLOSARIO
+    if isinstance(glosario, dict):
+        # Si es diccionario, genera un texto legible
+        if "criterios" in glosario:
+            for clave, desc in glosario.get("criterios", {}).items():
+                lineas.append(f"  {clave.replace('_', ' ').upper()}: {desc}")
     lineas.append("")
     lineas.append(signals.DESCARGO)
     return "\n".join(lineas)
