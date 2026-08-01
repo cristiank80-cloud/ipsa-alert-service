@@ -2,42 +2,28 @@ name: Monitoreo IPSA
 
 on:
   schedule:
-    # Cada 10 minutos, lunes a viernes, 12:00-21:00 UTC.
-    # Esto cubre con margen el horario de la Bolsa de Santiago
-    # (9:30-16:00 hora Chile), sin depender de saber si Chile está en
-    # horario de verano o no. Ajusta si quieres afinar la ventana.
+    # /run-check: cada 10 minutos, lunes a viernes, 12:00-21:00 UTC
+    # (cubre con margen el horario de la Bolsa de Santiago).
     - cron: '*/10 12-21 * * 1-5'
+    # /resumen-diario: una vez al dia, 20:30 UTC ~ 16:30 hora Chile
+    # (con horario de verano; si Chile no esta en horario de verano,
+    # ajusta a '30 19 * * 1-5').
+    - cron: '30 20 * * 1-5'
   workflow_dispatch: {}   # permite ejecutarlo manualmente desde GitHub para probar
 
 jobs:
-  check:
+  run-check:
+    if: github.event.schedule == '*/10 12-21 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Instalar dependencias
-        run: pip install -r requirements.txt
-
-      - name: Ejecutar ciclo de monitoreo
-        env:
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          SMTP_HOST: smtp.gmail.com
-          SMTP_PORT: 587
-          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-          VAPID_CLAIMS_EMAIL: ${{ secrets.VAPID_CLAIMS_EMAIL }}
-          SUBSCRIPTIONS_URL: ${{ secrets.SUBSCRIPTIONS_URL }}
-        run: python main.py
-
-      - name: Guardar el historial de precios actualizado
+      - name: Llamar a /run-check en Render
         run: |
-          git config user.name "ipsa-monitor-bot"
-          git config user.email "actions@github.com"
-          git add price_history.json
-          git diff --staged --quiet || git commit -m "Actualiza historial de precios [skip ci]"
-          git push
+          curl -sf "https://ipsa-alert-service.onrender.com/run-check?token=${{ secrets.CHECK_SECRET }}"
+
+  resumen-diario:
+    if: github.event.schedule == '30 20 * * 1-5'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar a /resumen-diario en Render
+        run: |
+          curl -sf "https://ipsa-alert-service.onrender.com/resumen-diario?token=${{ secrets.CHECK_SECRET }}"
