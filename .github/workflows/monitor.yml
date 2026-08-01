@@ -1,29 +1,10 @@
-name: Monitoreo IPSA
-
-on:
-  schedule:
-    # /run-check: cada 10 minutos, lunes a viernes, 12:00-21:00 UTC
-    # (cubre con margen el horario de la Bolsa de Santiago).
-    - cron: '*/10 12-21 * * 1-5'
-    # /resumen-diario: una vez al dia, 20:30 UTC ~ 16:30 hora Chile
-    # (con horario de verano; si Chile no esta en horario de verano,
-    # ajusta a '30 19 * * 1-5').
-    - cron: '30 20 * * 1-5'
-  workflow_dispatch: {}   # permite ejecutarlo manualmente desde GitHub para probar
-
-jobs:
-  run-check:
+run-check:
     if: github.event.schedule == '*/10 12-21 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Llamar a /run-check en Render
         run: |
-          curl -sf "https://ipsa-alert-service.onrender.com/run-check?token=${{ secrets.CHECK_SECRET }}"
-
-  resumen-diario:
-    if: github.event.schedule == '30 20 * * 1-5'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Llamar a /resumen-diario en Render
-        run: |
-          curl -sf "https://ipsa-alert-service.onrender.com/resumen-diario?token=${{ secrets.CHECK_SECRET }}"
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" "https://ipsa-alert-service.onrender.com/run-check?token=${{ secrets.CHECK_SECRET }}")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          if [ "$codigo" -ge 400 ]; then exit 1; fi
