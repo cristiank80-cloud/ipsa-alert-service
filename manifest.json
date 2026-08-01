@@ -1,0 +1,13 @@
+{
+  "name": "IPSA Monitor",
+  "short_name": "IPSA",
+  "description": "Monitor de acciones IPSA con alertas de caída bajo el promedio histórico",
+  "start_url": "./ipsa_monitor_prototipo_v2.html",
+  "display": "standalone",
+  "background_color": "#14171A",
+  "theme_color": "#14171A",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
