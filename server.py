@@ -539,7 +539,17 @@ def resumen_diario():
         lineas.append(f"({r['filtradas_por_liquidez']} acciones quedaron fuera del "
                       f"ranking por transar muy poco al dia.)")
         lineas.append("")
-    lineas.append(signals.GLOSARIO)
+
+    # Agregar GLOSARIO (puede ser diccionario o string)
+    glosario = signals.GLOSARIO
+    if isinstance(glosario, dict):
+        lineas.append("CONCEPTOS CLAVE:")
+        if "criterios" in glosario:
+            for clave, desc in glosario.get("criterios", {}).items():
+                lineas.append(f"  {clave.replace('_', ' ').upper()}: {desc}")
+    else:
+        lineas.append(glosario)
+
     lineas.append("")
     lineas.append(signals.DESCARGO)
 
