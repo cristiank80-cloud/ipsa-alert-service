@@ -79,6 +79,7 @@ DESCARGO = (
 )
 
 
+
 def _pct(x):
     return None if x is None else round(x * 100, 1)
 
@@ -298,3 +299,25 @@ def describe(ev):
     if ev.get("banderas"):
         linea += f" · {len(ev['banderas'])} bandera(s) roja(s)"
     return linea
+
+
+# Diccionario de explicaciones para el correo y la app
+GLOSARIO = {
+    "banderas": {
+        "CAIDA SOSTENIDA": "Precio bajo SMA50 y SMA20 bajo SMA50 — tendencia bajista establecida. No es un buen momento para comprar.",
+        "LIQUIDEZ BAJA": "Volumen promedio menor que el umbral. Difícil de ejecutar sin mover el precio en contra.",
+        "RSI EXTREMO": "RSI fuera de rango normal (< 10 o > 90) — sobrevendido o sobrecomprado severo.",
+    },
+    "puntaje": {
+        "alto_positivo": "Puntaje >= 20: señal de posible compra. El precio está bajo su promedio (z-score bajo) y hay tendencia alcista.",
+        "alto_negativo": "Puntaje <= -20: señal de posible venta. El precio está alto su promedio (z-score alto) y hay tendencia bajista.",
+        "neutral": "Puntaje entre -20 y 20: sin señal clara. Monitorea los cambios en los próximos días.",
+    },
+    "criterios": {
+        "z_score": "Cuántas desviaciones estándar está el precio hoy respecto de su promedio de 90 días. Z < -1.5 es bajo; Z > 1.5 es alto.",
+        "rsi14": "Índice de Fuerza Relativa a 14 días. < 30 es sobrevendido; > 70 es sobrecomprado.",
+        "sma": "Promedios móviles simples. SMA20: precio promedio últimos 20 días. SMA50: últimos 50 días. Si SMA20 > SMA50, tendencia alcista.",
+        "fuerza_relativa": "Cómo se movió la acción MENOS cómo se movió el IPSA en el mismo período. Evita falsos positivos cuando cae todo el mercado.",
+        "liquidez": "Volumen en pesos transado en promedio. Acciones con volumen bajo pueden no ejecutarse bien a buenos precios.",
+    },
+}
