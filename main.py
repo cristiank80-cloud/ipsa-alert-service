@@ -53,5 +53,36 @@ TICKERS = [
 # llevan sufijo .SN al pedirlos a Yahoo (ver data_source.get_market_data
 # con suffix="").
 TICKERS_USA = [
-    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND",
+    # --- Nucleo de ETF (los 7 que ya estaban) ---
+    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD",
+    "BND",
+    # --- 100 acciones grandes de EE.UU. ---
+    # Elegidas del catalogo de Racional que me pasaste, priorizando
+    # capitalizacion de mercado y peso en el S&P 500. Se dejaron fuera a
+    # proposito: ETF apalancados/inversos (2X, 3X, "Short"), warrants,
+    # papeles OTC y tickers marcados .OLD en ese catalogo -- Honeywell
+    # aparecia como "HON.OLD", que es un simbolo retirado, asi que no se
+    # incluyo en vez de arriesgar un 404 permanente.
+    #
+    # OJO con Berkshire: el catalogo lo lista como "BRK.B", pero Yahoo usa
+    # guion en las clases de accion. Aca va "BRK-B" porque este texto se
+    # manda tal cual como simbolo a Yahoo (ver data_source.get_market_data).
+    # Block aparece como "XYZ": cambio su simbolo desde "SQ" en enero 2025.
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META",
+    "TSLA", "AVGO", "TSM", "ORCL", "NFLX", "AMD",
+    "CRM", "ADBE", "INTC", "QCOM", "TXN", "AMAT",
+    "LRCX", "KLAC", "MU", "ASML", "ARM", "PLTR",
+    "NOW", "INTU", "IBM", "CSCO", "ACN", "UBER",
+    "SHOP", "PANW", "CRWD", "SNOW", "ANET", "MRVL",
+    "DELL", "SMCI", "COIN", "SPOT", "ABNB", "BKNG",
+    "MELI", "XYZ", "PYPL", "BRK-B", "JPM", "V",
+    "MA", "BAC", "WFC", "GS", "MS", "C",
+    "BLK", "AXP", "SCHW", "SPGI", "KKR", "BX",
+    "LLY", "JNJ", "UNH", "ABBV", "MRK", "TMO",
+    "ABT", "PFE", "AMGN", "DHR", "ISRG", "NVO",
+    "VRTX", "BMY", "MDT", "WMT", "COST", "PG",
+    "HD", "KO", "PEP", "MCD", "NKE", "SBUX",
+    "DIS", "PM", "TGT", "LOW", "TJX", "XOM",
+    "CVX", "COP", "CAT", "BA", "GE", "RTX",
+    "UNP", "LMT", "DE", "LIN",
 ]
