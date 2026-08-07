@@ -368,12 +368,20 @@ def enviar_push(payload_dict):
                 pass
             fallidos += 1
             # 404/410: la suscripcion ya no existe (PWA desinstalada, etc.)
-            # VapidPkHashMismatch: la suscripcion se creo con una clave
-            # publica VAPID distinta a la actual (por ejemplo, quedo de
-            # antes de rotar la clave). En ambos casos ya no sirve.
-            vencida = codigo in (404, 410) or "VapidPkHashMismatch" in cuerpo
+            # VapidPkHashMismatch, o un 403 que dice "do not correspond to
+            # the credentials": la suscripcion se creo con una clave publica
+            # VAPID distinta a la actual (por ejemplo, quedo de antes de
+            # rotar la clave). En todos estos casos ya no sirve -- antes
+            # solo se reconocia el texto exacto "VapidPkHashMismatch", pero
+            # algunos servicios (ej. el push de Chrome/Resend) devuelven un
+            # 403 con otro texto para el mismo problema, y esa suscripcion
+            # se quedaba fallando para siempre sin limpiarse nunca.
+            texto_desajuste = "do not correspond to the credentials" in cuerpo
+            vencida = (codigo in (404, 410)
+                       or "VapidPkHashMismatch" in cuerpo or texto_desajuste)
             if vencida:
-                motivo = f"{codigo}" if codigo in (404, 410) else "VapidPkHashMismatch"
+                motivo = (f"{codigo}" if codigo in (404, 410)
+                          else "VapidPkHashMismatch/clave desajustada")
                 detalle.append(f"suscripcion vencida ({motivo}), eliminada")
                 print(f"[notify] Suscripcion vencida ({motivo}); se elimina.")
             else:

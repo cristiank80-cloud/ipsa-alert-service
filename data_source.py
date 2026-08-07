@@ -182,9 +182,9 @@ def _quote_de_meta(res):
     }
 
 
-def get_market_data(tickers):
+def get_market_data(tickers, suffix=None):
     """
-    Precio en vivo de las 47 acciones, en una sola tanda paralela.
+    Precio en vivo de las acciones, en una sola tanda paralela.
     Devuelve (quotes, index) por compatibilidad con quien ya desestructura
     la tupla, pero `index` SIEMPRE es None: el IPSA ya no se pide a Yahoo
     (^IPSA quedaba con `regularMarketTime` pegado dias enteros para ese
@@ -193,8 +193,15 @@ def get_market_data(tickers):
 
     Sacar ^IPSA de esta tanda tambien reduce las peticiones a Yahoo de 48 a
     47 por ciclo -- un poco menos de riesgo de que Yahoo responda 429.
+
+    `suffix`: por defecto (None) usa SUFFIX (".SN", Bolsa de Santiago). Los
+    tickers del ambiente 2 (EE.UU., ver main.TICKERS_USA) se piden con
+    suffix="" -- Yahoo los resuelve por su simbolo tal cual, sin sufijo de
+    bolsa. Este parametro no cambia el comportamiento de ningun llamado
+    existente que no lo pase.
     """
-    simbolos = [t + SUFFIX for t in tickers]
+    suf = SUFFIX if suffix is None else suffix
+    simbolos = [t + suf for t in tickers]
 
     def _uno(sym):
         return sym, _chart(sym, {"range": "1d", "interval": "1m"})
@@ -203,7 +210,7 @@ def get_market_data(tickers):
 
     quotes = {}
     for t in tickers:
-        res = resultados.get(t + SUFFIX)
+        res = resultados.get(t + suf)
         if not res:
             continue
         q = _quote_de_meta(res)
@@ -352,7 +359,7 @@ def _estadisticas(puntos, dias_promedio=90):
     }
 
 
-def get_stats(tickers, dias_promedio=90):
+def get_stats(tickers, dias_promedio=90, suffix=None, con_indice=True):
     """
     Estadisticas de todas las acciones MAS las del indice, en paralelo.
     Reemplaza a get_daily_avg() + get_returns() y ademas entrega RSI,
@@ -361,8 +368,13 @@ def get_stats(tickers, dias_promedio=90):
     Devuelve (stats_por_ticker, stats_del_indice, series_por_ticker).
     Las series se devuelven para que server.py las cachee y las reuse en
     /history y en el calculo de senales, en vez de volver a pedirlas.
+
+    `suffix`: ver get_market_data(). `con_indice=False` evita pedir
+    INDEX_SYMBOL (^IPSA) -- se usa para el ambiente 2 (EE.UU.), donde el
+    indice de referencia (S&P 500) no sale de aqui.
     """
-    simbolos = [t + SUFFIX for t in tickers] + [INDEX_SYMBOL]
+    suf = SUFFIX if suffix is None else suffix
+    simbolos = [t + suf for t in tickers] + ([INDEX_SYMBOL] if con_indice else [])
 
     def _uno(sym):
         return sym, _serie_diaria(sym, "1y")
@@ -371,7 +383,7 @@ def get_stats(tickers, dias_promedio=90):
 
     stats, series_por_ticker = {}, {}
     for t in tickers:
-        puntos = series.get(t + SUFFIX) or []
+        puntos = series.get(t + suf) or []
         if not puntos:
             continue
         series_por_ticker[t] = puntos
@@ -379,20 +391,24 @@ def get_stats(tickers, dias_promedio=90):
         if st:
             stats[t] = st
 
-    stats_indice = _estadisticas(series.get(INDEX_SYMBOL) or [], dias_promedio)
+    stats_indice = _estadisticas(series.get(INDEX_SYMBOL) or [], dias_promedio) if con_indice else None
     return stats, stats_indice, series_por_ticker
 
 
-def get_price_history(ticker, period="3mo"):
+def get_price_history(ticker, period="3mo", suffix=None):
     """
     Serie para el grafico. Se mantiene la firma anterior para no romper
     /history. Nota: si server.py ya tiene la serie anual cacheada, conviene
     recortarla desde ahi en vez de llamar a esta funcion.
+
+    `suffix`: ver get_market_data(). server.py lo pasa como "" para los
+    tickers del ambiente 2 (EE.UU.).
     """
+    suf = SUFFIX if suffix is None else suffix
     mapa = {"1d": "1d", "5d": "5d", "1mo": "1mo", "3mo": "3mo",
             "6mo": "6mo", "ytd": "ytd", "1y": "1y", "5y": "5y"}
     rango = mapa.get(period, "3mo")
-    simbolo = INDEX_SYMBOL if ticker.upper() in ("IPSA", "^IPSA") else ticker + SUFFIX
+    simbolo = INDEX_SYMBOL if ticker.upper() in ("IPSA", "^IPSA") else ticker + suf
 
     if rango in ("1d", "5d"):
         # OJO: antes "5d" caia directo a _serie_diaria() -> interval=1d,

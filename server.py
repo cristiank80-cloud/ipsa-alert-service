@@ -45,7 +45,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from data_source import get_market_data, get_stats, get_price_history
-from main import TICKERS
+from main import TICKERS, TICKERS_USA
 import fuente_bolsa
 import fuente_df
 import news
@@ -63,6 +63,20 @@ STATS_CACHE_TTL = int(os.environ.get("STATS_CACHE_TTL", 1800))
 
 _price_cache = {"quotes": None, "index": None, "ts": 0, "fuente": None}
 _stats_cache = {"stats": None, "indice": None, "series": None, "ts": 0}
+# Cache separada para el ambiente 2 (EE.UU.). Ver seccion 2.3 de la spec v3:
+# mismo mecanismo que Chile, pero sin indice propio (el S&P 500 no sale de
+# fuente_df) y sin pasar por fuente_bolsa (esa API es solo Bolsa de Santiago).
+_price_cache_usa = {"quotes": None, "index": None, "ts": 0}
+_stats_cache_usa = {"stats": None, "series": None, "ts": 0}
+# S&P 500 como referencia del ambiente 2. A diferencia del IPSA, este SI se
+# pide a Yahoo con el mecanismo generico get_market_data() -- el bug de
+# "regularMarketTime pegado" que obligo a sacar el IPSA de Yahoo era
+# especifico de ^IPSA (confirmado cruzando contra Visfin, ver
+# fuente_df.py); ^GSPC es uno de los simbolos mas liquidos que existen y no
+# se ha observado ese problema en el. Igual viaja con staleSeconds real, asi
+# que si algun dia se queda pegado, la app lo va a mostrar viejo en vez de
+# ocultarlo silenciosamente.
+INDEX_SYMBOL_USA = "^GSPC"
 _news_cache = {}
 NEWS_CACHE_TTL = 1800
 
@@ -136,6 +150,35 @@ def _refrescar_precios(forzar=False):
             # antiguedad real viaja en cada precio, asi que la app lo sabe.
             print("[server] get_market_data no devolvio nada; se conserva la cache anterior.")
     return _price_cache
+
+
+# --------------------------------------------------------------------------
+# Ambiente 2 (EE.UU. · USD) -- mismo patron de cache que Chile, pero mas
+# simple: siempre Yahoo (no hay "API de la Bolsa" equivalente para EE.UU.
+# en este proyecto), sin indice propio, sin fuente_bolsa/fuente_df.
+# --------------------------------------------------------------------------
+
+def _refrescar_stats_usa(forzar=False):
+    ahora = time.time()
+    if forzar or _stats_cache_usa["stats"] is None or (ahora - _stats_cache_usa["ts"]) > STATS_CACHE_TTL:
+        stats, _, series = get_stats(TICKERS_USA, suffix="", con_indice=False)
+        if stats:
+            _stats_cache_usa.update({"stats": stats, "series": series, "ts": ahora})
+    return _stats_cache_usa
+
+
+def _refrescar_precios_usa(forzar=False):
+    ahora = time.time()
+    if forzar or _price_cache_usa["quotes"] is None or (ahora - _price_cache_usa["ts"]) > PRICE_CACHE_TTL:
+        # El indice viaja en la MISMA tanda paralela que los ETFs (igual que
+        # se hizo para las 47 acciones chilenas) -- no una peticion aparte.
+        quotes, _ = get_market_data(TICKERS_USA + [INDEX_SYMBOL_USA], suffix="")
+        if quotes:
+            indice = quotes.pop(INDEX_SYMBOL_USA, None)
+            _price_cache_usa.update({"quotes": quotes, "index": indice, "ts": ahora})
+        elif _price_cache_usa["quotes"] is not None:
+            print("[server] get_market_data (USA) no devolvio nada; se conserva la cache anterior.")
+    return _price_cache_usa
 
 
 # --------------------------------------------------------------------------
@@ -244,14 +287,84 @@ def quotes():
         # Si el indice no llego, la app NO debe mostrar el valor anterior
         # como si fuera de ahora. Este flag existe para eso.
         "indexDisponible": index is not None,
-        # UF y UTM, tambien de Diario Financiero (ver fuente_df.py).
+        # UF, UTM y dolar observado (CLP=X), los tres de Diario Financiero
+        # (ver fuente_df.py). El dolar es el que habilita el ambiente 2 y
+        # los totales consolidados de la seccion 4.2 de la especificacion.
         "uf": indicadores.get("uf"),
         "utm": indicadores.get("utm"),
+        "usdclp": indicadores.get("usdclp"),
         "recibidos": len(data),
         "esperados": len(TICKERS),
         "cached_at": pc["ts"],
         "cache_ttl_seconds": PRICE_CACHE_TTL,
         "fuente": pc.get("fuente", "yahoo"),
+        "serverTime": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route("/quotes-usa", methods=["GET"])
+def quotes_usa():
+    """
+    Igual que /quotes pero para el ambiente 2 (EE.UU. · USD, ver main.
+    TICKERS_USA). Sin indice propio (el S&P 500 no sale de Diario
+    Financiero) y sin puntas de compra/venta (Yahoo tampoco las publica
+    para EE.UU. en el plan gratuito que usa esta app). El frontend debe
+    convertir con el mismo usdclp que ya recibe de /quotes -- no hay un
+    segundo tipo de cambio aca.
+    """
+    st = _refrescar_stats_usa()
+    pc = _refrescar_precios_usa()
+
+    stats = st["stats"] or {}
+    quotes_raw = pc["quotes"] or {}
+
+    data = {}
+    for t in TICKERS_USA:
+        q = quotes_raw.get(t)
+        if not q:
+            continue
+        s = stats.get(t, {})
+        volumen = q.get("volume")
+        data[t] = {
+            "price": q["price"],
+            "avg": s.get("avg90"),
+            "marketTime": q.get("marketTime"),
+            "staleSeconds": q.get("staleSeconds"),
+            "fetchedAt": q.get("fetchedAt"),
+            "previousClose": q.get("previousClose"),
+            "dayHigh": q.get("dayHigh"),
+            "dayLow": q.get("dayLow"),
+            "volume": volumen,
+            "montoTransado": (volumen * q["price"]) if volumen else None,
+            "ret3m": s.get("ret3m"),
+            "ret1y": s.get("ret1y"),
+            "rsi14": s.get("rsi14"),
+            "sma20": s.get("sma20"),
+            "sma50": s.get("sma50"),
+            "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
+            "volDiaria": s.get("volDiaria"),
+            "montoMedioDiario30d": s.get("montoMedioDiario30d"),
+            "bid": None, "ask": None, "bidSize": None, "askSize": None,
+            "puntasDisponibles": False,
+        }
+
+    indice = pc.get("index")
+    return jsonify({
+        "quotes": data,
+        "index": {
+            "value": indice["price"],
+            "previousClose": indice.get("previousClose"),
+            "marketTime": indice.get("marketTime"),
+            "staleSeconds": indice.get("staleSeconds"),
+            "fetchedAt": indice.get("fetchedAt"),
+            "fuenteNombre": "Yahoo Finance (^GSPC)",
+        } if indice else None,
+        "indexDisponible": indice is not None,
+        "recibidos": len(data),
+        "esperados": len(TICKERS_USA),
+        "cached_at": pc["ts"],
+        "cache_ttl_seconds": PRICE_CACHE_TTL,
+        "fuente": "yahoo",
         "serverTime": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -262,7 +375,35 @@ def signals_endpoint():
     Ranking con reglas explicitas. NO es una lista de compras sugeridas:
     cada item trae sus razones y sus banderas rojas para que puedas
     descartarlo. Ver el descargo en signals.py.
+
+    NOTA (bloque 10 de la especificacion v3, "reencuadre de alertas"):
+    esto SOLO evalua las 47 acciones chilenas (TICKERS). El ambiente
+    EE.UU. (TICKERS_USA) todavia no tiene un equivalente -- signals.rankear()
+    esta escrito contra el universo y los umbrales del IPSA, y extenderlo
+    a ETFs en USD (otra escala de precio, otra volatilidad tipica, y sin
+    el mismo z-score historico) es un cambio de logica, no solo de datos,
+    que no se hizo en esta pasada.
+
+    El parametro `mercado=usa` YA se reconoce (para que el frontend, que
+    ya pide /signals?mercado=usa segun la seccion 5.1 de la spec, tenga
+    una respuesta explicita) pero de forma honesta: devuelve 404 en vez
+    de 200 con los datos de Chile mal etiquetados como si fueran de
+    EE.UU. El panel de analisis y "A seguir" del frontend ya saben
+    degradar con gracia ante ese 404 (ver renderAnalysis() y
+    renderAmbienteSeguir() en index.html). Cuando se implemente de
+    verdad, basta con reemplazar el bloque de abajo por el calculo real
+    y devolver 200 con `"mercado": "usa"` en el cuerpo. Tambien
+    pendiente: notify.py solo manda correo/push para candidatos de este
+    endpoint, asi que las alertas por correo/push de EE.UU. dependen de
+    este mismo trabajo.
     """
+    mercado = request.args.get("mercado", "").lower()
+    if mercado == "usa":
+        return jsonify({
+            "error": "signals.py todavia no evalua reglas para el mercado 'usa'",
+            "mercado": "usa",
+        }), 404
+
     st = _refrescar_stats()
     pc = _refrescar_precios()
     if not pc["quotes"]:
@@ -297,14 +438,17 @@ HISTORY_CACHE_TTL = 1800
 def history():
     ticker = request.args.get("ticker", "").upper()
     period = request.args.get("period", "3mo").lower()
-    if ticker not in TICKERS and ticker not in ("IPSA", "^IPSA"):
+    es_usa = ticker in TICKERS_USA
+    if ticker not in TICKERS and not es_usa and ticker not in ("IPSA", "^IPSA"):
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     if period not in VALID_PERIODS:
         return jsonify({"error": f"period debe ser uno de {sorted(VALID_PERIODS)}"}), 400
 
     # Si la serie anual ya esta en cache, se recorta de ahi en vez de
     # volver a pedirsela a Yahoo. Menos peticiones = menos rate limiting.
-    st = _refrescar_stats()
+    # Las series de ambiente 2 viven en una cache separada (ver
+    # _refrescar_stats_usa) porque no comparten ciclo con las de Chile.
+    st = _refrescar_stats_usa() if es_usa else _refrescar_stats()
     dias = {"1mo": 21, "3mo": 63, "6mo": 126, "ytd": None, "1y": 252}.get(period)
     serie = (st.get("series") or {}).get(ticker)
     if serie and dias and len(serie) >= dias:
@@ -315,7 +459,8 @@ def history():
     ahora = time.time()
     c = _history_cache.get(key)
     if c is None or (ahora - c["ts"]) > HISTORY_CACHE_TTL:
-        _history_cache[key] = {"data": get_price_history(ticker, period), "ts": ahora}
+        suf = "" if es_usa else None
+        _history_cache[key] = {"data": get_price_history(ticker, period, suffix=suf), "ts": ahora}
     return jsonify({"ticker": ticker, "period": period,
                     "points": _history_cache[key]["data"], "origen": "yahoo"})
 
@@ -323,7 +468,7 @@ def history():
 @app.route("/news", methods=["GET"])
 def news_endpoint():
     ticker = request.args.get("ticker", "").upper()
-    if ticker not in TICKERS:
+    if ticker not in TICKERS and ticker not in TICKERS_USA:
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     ahora = time.time()
     c = _news_cache.get(ticker)

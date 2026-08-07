@@ -64,6 +64,12 @@ _ESPACIOS = re.compile(r"\s+")
 _RE_IPSA = re.compile(r"SP IPSA\s+(-?[\d.,]+)\s+(-?[\d.,]+)")
 _RE_UF = re.compile(r"\bUF\s+\$?\s*(-?[\d.,]+)")
 _RE_UTM = re.compile(r"\bUTM\s+\$?\s*(-?[\d.,]+)")
+# "DOLAR $908,40" -- dolar observado (CLP=X), mismo bloque de la pagina que
+# ya usan UF y UTM. Verificado contra la pagina real el 2026-08-07: el
+# bloque destacado dice literalmente "DOLAR" seguido del monto en pesos.
+# Esta es la fuente que pide la seccion 4.2 de la especificacion v3: usar
+# el mismo origen que UF/UTM en vez de pedirle CLP=X a Yahoo.
+_RE_DOLAR = re.compile(r"\bDOLAR\s+\$?\s*(-?[\d.,]+)")
 
 # Cache muy corta compartida entre get_index() y get_uf_utm(): si server.py
 # pide las dos cosas en el mismo ciclo de refresco, esto evita descargar la
@@ -160,15 +166,26 @@ def get_index():
 
 
 def get_uf_utm():
-    """{'uf': float, 'utm': float, 'fetchedAt': iso} -- lo que falte queda en None."""
+    """
+    {'uf': float, 'utm': float, 'usdclp': float, 'fetchedAt': iso}
+    -- lo que falte queda en None.
+
+    `usdclp` es el dolar observado (equivalente a Yahoo CLP=X) leido del
+    mismo bloque destacado de la pagina que UF y UTM -- no es el dolar
+    interbancario intradia, es el que publica Diario Financiero en esa
+    pagina. Igual que el IPSA, no viene con hora de bolsa propia: usa
+    `fetchedAt`, el momento en que este servidor consulto la pagina.
+    """
     texto = _obtener_texto_pagina()
     if texto is None:
-        return {"uf": None, "utm": None, "fetchedAt": None}
+        return {"uf": None, "utm": None, "usdclp": None, "fetchedAt": None}
 
     m_uf = _RE_UF.search(texto)
     m_utm = _RE_UTM.search(texto)
+    m_dolar = _RE_DOLAR.search(texto)
     return {
         "uf": _num_cl(m_uf.group(1)) if m_uf else None,
         "utm": _num_cl(m_utm.group(1)) if m_utm else None,
+        "usdclp": _num_cl(m_dolar.group(1)) if m_dolar else None,
         "fetchedAt": datetime.now(timezone.utc).isoformat(),
     }

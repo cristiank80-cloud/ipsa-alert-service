@@ -30,6 +30,28 @@ TICKERS = [
     "ALMENDRAL", "ENELGXCH", "WATTS", "CRISTALES", "BESALCO",
     "PUCOBRE", "LIPIGAS", "BLUMAR", "ORO-BLANCO", "AAISA",
     "ENJOY", "INDISA", "SOCOVESA",
+    # Agregadas en v3 (bloque 9 de la spec) -- verificadas una por una contra
+    # Yahoo Finance antes de sumarlas (busqueda web, no se pudo hacer curl
+    # directo desde este sandbox por el mismo bloqueo de red que afecta a
+    # data_source.py; ver comentario ahi):
+    #   ITAUCL.SN     -> Banco Itaú Chile (el simbolo viejo ITAUCORP.SN fue
+    #                     renombrado a ITAUCL.SN en 2023, por eso el intento
+    #                     anterior con "ITAUCORP" fallaba)
+    #   CENCOSHOPP.SN -> Cencosud Shopping S.A. (existe, separado de
+    #                     CENCOMALLS.SN que es el mismo emisor con otro simbolo)
+    #   ILC.SN        -> Inversiones La Construcción S.A.
+    #   SALFACORP.SN  -> SalfaCorp S.A.
+    #   SMSAAM.SN     -> Sociedad Matriz SAAM S.A. (reintentado como SMSAAM,
+    #                     el simbolo viejo "SAAM" no existia)
+    "ITAUCL", "CENCOSHOPP", "ILC", "SALFACORP", "SMSAAM",
     # Removidas (no existen en Yahoo Finance con .SN, confirmado en produccion):
-    # CENCOSHOPP, ITAUCORP, SECURITY, BICECORP, SAAM, EMBONOR
+    # ITAUCORP, SECURITY, BICECORP, SAAM, EMBONOR
+]
+
+# Ambiente 2 (EE.UU. · USD) -- especificacion v3, seccion 2.3. Nucleo de
+# ETFs sugerido; ajustar segun preferencia real del usuario. Estos NO
+# llevan sufijo .SN al pedirlos a Yahoo (ver data_source.get_market_data
+# con suffix="").
+TICKERS_USA = [
+    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND",
 ]
