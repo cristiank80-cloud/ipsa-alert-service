@@ -263,6 +263,15 @@ def subscribe():
 
 @app.route("/subscriptions", methods=["GET"])
 def list_subscriptions():
+    """
+    OJO: esto devuelve las suscripciones COMPLETAS, con sus claves `p256dh`
+    y `auth`. Con esas dos claves cualquiera puede mandarle notificaciones
+    a ese dispositivo. Estaba abierto sin token -- ahora pide el mismo
+    CHECK_SECRET que el resto de los endpoints de administracion.
+    Para diagnosticar sin exponer nada, usa /push-debug.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
     return jsonify(_leer_subs())
 
 
@@ -805,7 +814,35 @@ def diag_bolsa():
 def push_debug():
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
         return jsonify({"error": "no autorizado"}), 401
-    return jsonify(notify.vapid_diagnostico())
+    info = notify.vapid_diagnostico()
+
+    # Ficha por dispositivo suscrito, SIN exponer las claves. Lo unico que
+    # se necesita para diagnosticar es a que servicio de push pertenece
+    # cada suscripcion: el host dice si es un iPhone, un Chrome de
+    # escritorio o un Firefox, y con eso se sabe donde mirar cuando el
+    # envio sale bien pero la notificacion no aparece.
+    servicios = {
+        "web.push.apple.com": "iPhone/iPad/Mac (Safari · PWA en pantalla de inicio)",
+        "fcm.googleapis.com": "Chrome / Edge / Android",
+        "updates.push.services.mozilla.com": "Firefox",
+        "wns2-": "Windows (Edge antiguo)",
+    }
+    fichas = []
+    for sub in _leer_subs():
+        ep = sub.get("endpoint") or ""
+        host = ep.split("/")[2] if "://" in ep else "?"
+        cual = next((v for k, v in servicios.items() if k in host), "desconocido")
+        keys = sub.get("keys") or {}
+        fichas.append({
+            "servicio": host,
+            "probablemente": cual,
+            # Solo la cola del endpoint, suficiente para distinguir dos
+            # dispositivos entre si sin publicar el identificador entero.
+            "endpoint_termina_en": ep[-12:] if ep else None,
+            "trae_claves": bool(keys.get("p256dh") and keys.get("auth")),
+        })
+    info["dispositivos"] = fichas
+    return jsonify(info)
 
 
 @app.route("/push-test", methods=["GET", "POST"])
