@@ -195,6 +195,43 @@ def _leer_subs():
     return []
 
 
+@app.route("/vapid-public-key", methods=["GET"])
+def vapid_public_key():
+    """
+    Entrega la clave publica VAPID que corresponde a la privada que este
+    servidor tiene configurada.
+
+    POR QUE EXISTE
+    ==============
+    Hasta ahora la clave publica estaba escrita a mano en el HTML de la PWA
+    y la privada vivia en las variables de entorno de Render. Son dos copias
+    del mismo dato en dos lugares distintos, y se desincronizaron: el HTML
+    tenia una clave (BOQ6bc...) y el servidor derivaba otra (BKLnGp...).
+
+    Con claves distintas el navegador SI deja suscribirse y SI dice que todo
+    salio bien -- el celular no tiene como saber cual es la clave correcta.
+    El push se cae despues, en silencio, cuando el servidor lo firma con una
+    identidad que no calza con la de la suscripcion y el servicio de push
+    (Apple/Google) lo rechaza. Por eso el boton decia "activas" y nunca
+    llegaba nada: no habia ningun error visible en ninguna de las dos
+    puntas.
+
+    Publicando la clave aca, la PWA la pide al arrancar y siempre usa la del
+    servidor. Deja de haber dos copias que puedan discrepar.
+
+    Es PUBLICA a proposito -- va dentro de cada suscripcion push y cualquiera
+    que abra la app la ve. Lo secreto es la privada, que no sale de aca.
+    """
+    diag = notify.vapid_diagnostico()
+    clave = diag.get("publica_derivada")
+    if not clave:
+        return jsonify({
+            "error": "el servidor no tiene una clave VAPID valida configurada",
+            "detalle": diag.get("error"),
+        }), 503
+    return jsonify({"key": clave})
+
+
 @app.route("/subscribe", methods=["POST"])
 def subscribe():
     """
