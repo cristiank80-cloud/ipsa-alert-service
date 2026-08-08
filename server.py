@@ -38,6 +38,7 @@ CAMBIOS RESPECTO DE LA VERSION ANTERIOR
 """
 import os
 import json
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -94,14 +95,68 @@ FALLOS_PARA_ALARMA = int(os.environ.get("FALLOS_PARA_ALARMA", 3))
 # --------------------------------------------------------------------------
 # Cache
 # --------------------------------------------------------------------------
+#
+# POR QUE LAS ACTUALIZACIONES CORREN EN SEGUNDO PLANO
+# ===================================================
+# Render en plan gratuito levanta UN solo worker de gunicorn, y ese worker
+# atiende una peticion a la vez. Mientras estuvo con 47 acciones chilenas y
+# 7 ETF, refrescar la cache dentro de la peticion tardaba poco y no se
+# notaba.
+#
+# Al pasar el ambiente de EE.UU. de 7 a 107 instrumentos, `get_stats` empezo
+# a bajar 107 historiales de un año completo cada media hora. Eso deja al
+# unico worker ocupado hasta un minuto, y durante ese rato TODO lo demas
+# queda haciendo cola detras: /quotes, /health y -- lo importante para las
+# notificaciones -- /subscribe. Desde el celular eso se ve como "sin
+# conexion al backend" y como un 502, aunque el servidor este vivo: no esta
+# caido, esta ocupado.
+#
+# Ahora las peticiones NUNCA esperan a Yahoo. Devuelven al tiro lo que haya
+# en cache (aunque este vacio o viejo) y, si corresponde, disparan la
+# actualizacion en un hilo aparte. La app ya sabe mostrar "Cargando datos
+# reales..." y la antiguedad real de cada dato, asi que no se inventa nada:
+# solo se deja de bloquear el servidor para conseguirlo.
+
+_locks_refresco = {}
+_locks_refresco_mutex = threading.Lock()
+
+
+def _en_segundo_plano(nombre, funcion):
+    """
+    Corre `funcion` en un hilo aparte, garantizando que no haya dos
+    actualizaciones del mismo tipo a la vez (si ya hay una en curso, esta
+    llamada no hace nada en vez de encolar otra descarga de 107 historiales).
+    """
+    with _locks_refresco_mutex:
+        lock = _locks_refresco.setdefault(nombre, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return False  # ya hay una actualizacion de este tipo corriendo
+
+    def _correr():
+        try:
+            funcion()
+        except Exception as e:
+            print(f"[server] Fallo la actualizacion en segundo plano '{nombre}': "
+                  f"{type(e).__name__}: {e}")
+        finally:
+            lock.release()
+
+    threading.Thread(target=_correr, name=f"refresco-{nombre}", daemon=True).start()
+    return True
+
 
 def _refrescar_stats(forzar=False):
     ahora = time.time()
     if forzar or _stats_cache["stats"] is None or (ahora - _stats_cache["ts"]) > STATS_CACHE_TTL:
-        stats, indice, series = get_stats(TICKERS)
-        if stats:  # solo se pisa la cache si vino algo; si Yahoo fallo, se
-            _stats_cache.update({"stats": stats, "indice": indice,  # conserva lo viejo
-                                 "series": series, "ts": ahora})
+        def _trabajo():
+            stats, indice, series = get_stats(TICKERS)
+            if stats:  # solo se pisa la cache si vino algo; si Yahoo fallo, se
+                _stats_cache.update({"stats": stats, "indice": indice,  # conserva lo viejo
+                                     "series": series, "ts": time.time()})
+        if forzar:
+            _trabajo()          # /run-check y el resumen diario SI necesitan el dato ya
+        else:
+            _en_segundo_plano("stats_chile", _trabajo)
     return _stats_cache
 
 
@@ -141,14 +196,19 @@ def _obtener_precios():
 def _refrescar_precios(forzar=False):
     ahora = time.time()
     if forzar or _price_cache["quotes"] is None or (ahora - _price_cache["ts"]) > PRICE_CACHE_TTL:
-        quotes, index, fuente = _obtener_precios()
-        _price_cache["fuente"] = fuente
-        if quotes:
-            _price_cache.update({"quotes": quotes, "index": index, "ts": ahora})
-        elif _price_cache["quotes"] is not None:
-            # No se pisa con vacio: se conserva lo ultimo bueno, pero la
-            # antiguedad real viaja en cada precio, asi que la app lo sabe.
-            print("[server] get_market_data no devolvio nada; se conserva la cache anterior.")
+        def _trabajo():
+            quotes, index, fuente = _obtener_precios()
+            _price_cache["fuente"] = fuente
+            if quotes:
+                _price_cache.update({"quotes": quotes, "index": index, "ts": time.time()})
+            elif _price_cache["quotes"] is not None:
+                # No se pisa con vacio: se conserva lo ultimo bueno, pero la
+                # antiguedad real viaja en cada precio, asi que la app lo sabe.
+                print("[server] get_market_data no devolvio nada; se conserva la cache anterior.")
+        if forzar:
+            _trabajo()
+        else:
+            _en_segundo_plano("precios_chile", _trabajo)
     return _price_cache
 
 
@@ -159,25 +219,33 @@ def _refrescar_precios(forzar=False):
 # --------------------------------------------------------------------------
 
 def _refrescar_stats_usa(forzar=False):
+    # ESTE es el que provocaba el problema: 107 historiales de un año.
+    # Siempre en segundo plano, incluso con forzar=True -- no hay ningun
+    # camino en el que valga la pena tener el servidor entero detenido un
+    # minuto por las estadisticas de EE.UU.
     ahora = time.time()
     if forzar or _stats_cache_usa["stats"] is None or (ahora - _stats_cache_usa["ts"]) > STATS_CACHE_TTL:
-        stats, _, series = get_stats(TICKERS_USA, suffix="", con_indice=False)
-        if stats:
-            _stats_cache_usa.update({"stats": stats, "series": series, "ts": ahora})
+        def _trabajo():
+            stats, _, series = get_stats(TICKERS_USA, suffix="", con_indice=False)
+            if stats:
+                _stats_cache_usa.update({"stats": stats, "series": series, "ts": time.time()})
+        _en_segundo_plano("stats_usa", _trabajo)
     return _stats_cache_usa
 
 
 def _refrescar_precios_usa(forzar=False):
     ahora = time.time()
     if forzar or _price_cache_usa["quotes"] is None or (ahora - _price_cache_usa["ts"]) > PRICE_CACHE_TTL:
-        # El indice viaja en la MISMA tanda paralela que los ETFs (igual que
-        # se hizo para las 47 acciones chilenas) -- no una peticion aparte.
-        quotes, _ = get_market_data(TICKERS_USA + [INDEX_SYMBOL_USA], suffix="")
-        if quotes:
-            indice = quotes.pop(INDEX_SYMBOL_USA, None)
-            _price_cache_usa.update({"quotes": quotes, "index": indice, "ts": ahora})
-        elif _price_cache_usa["quotes"] is not None:
-            print("[server] get_market_data (USA) no devolvio nada; se conserva la cache anterior.")
+        def _trabajo():
+            # El indice viaja en la MISMA tanda paralela que los ETFs (igual
+            # que se hizo para las acciones chilenas) -- no una peticion aparte.
+            quotes, _ = get_market_data(TICKERS_USA + [INDEX_SYMBOL_USA], suffix="")
+            if quotes:
+                indice = quotes.pop(INDEX_SYMBOL_USA, None)
+                _price_cache_usa.update({"quotes": quotes, "index": indice, "ts": time.time()})
+            elif _price_cache_usa["quotes"] is not None:
+                print("[server] get_market_data (USA) no devolvio nada; se conserva la cache anterior.")
+        _en_segundo_plano("precios_usa", _trabajo)
     return _price_cache_usa
 
 
