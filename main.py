@@ -85,4 +85,6 @@ TICKERS_USA = [
     "DIS", "PM", "TGT", "LOW", "TJX", "XOM",
     "CVX", "COP", "CAT", "BA", "GE", "RTX",
     "UNP", "LMT", "DE", "LIN",
+    # Agregado a pedido: ETF sectorial de aeroespacial/defensa.
+    "ITA",
 ]

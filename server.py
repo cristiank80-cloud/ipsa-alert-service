@@ -57,6 +57,14 @@ app = Flask(__name__)
 CORS(app)
 
 SUBSCRIPTIONS_FILE = os.environ.get("SUBSCRIPTIONS_FILE", "push_subscriptions.json")
+# Precios objetivo por accion, definidos por el usuario en el modulo "Mi
+# Cartera" del frontend ("avisar si sube/baja a"). Mismo patron que
+# SUBSCRIPTIONS_FILE: disco EFIMERO en el plan gratuito de Render, se
+# pierde en cada reinicio/despliegue. El frontend se auto-cura igual que
+# hace con la suscripcion push: reenvia su copia de localStorage completa
+# cada vez que abre la app y cada vez que el usuario edita un objetivo, asi
+# que el servidor se repuebla solo sin que Cristian tenga que hacer nada.
+OBJETIVOS_FILE = os.environ.get("OBJETIVOS_FILE", "alertas_precio.json")
 CHECK_SECRET = os.environ.get("CHECK_SECRET")
 
 PRICE_CACHE_TTL = int(os.environ.get("PRICE_CACHE_TTL", 45))
@@ -263,6 +271,17 @@ def _leer_subs():
     return []
 
 
+def _leer_objetivos():
+    """{"TICKER": {"sube": float|None, "baja": float|None, "mercado": "CLP"|"USD"}}"""
+    if os.path.exists(OBJETIVOS_FILE):
+        try:
+            with open(OBJETIVOS_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[server] Archivo de objetivos de precio ilegible: {e}")
+    return {}
+
+
 @app.route("/vapid-public-key", methods=["GET"])
 def vapid_public_key():
     """
@@ -341,6 +360,56 @@ def list_subscriptions():
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
         return jsonify({"error": "no autorizado"}), 401
     return jsonify(_leer_subs())
+
+
+@app.route("/alertas-precio", methods=["POST"])
+def guardar_alertas_precio():
+    """
+    Recibe la copia COMPLETA de los precios objetivo que el usuario tiene
+    guardados en localStorage (modulo "Mi Cartera") y reemplaza el archivo
+    entero -- igual criterio que /subscribe: el frontend es la fuente de
+    verdad, el servidor solo necesita una copia fresca para poder avisar
+    aunque la app este cerrada. Se llama al abrir la app y cada vez que se
+    edita un objetivo (ver sincronizarAlertasPrecio() en el frontend).
+
+    Body esperado: {"objetivos": {"TICKER": {"sube": 123.4, "baja": null,
+    "mercado": "CLP"}, ...}}
+    """
+    body = request.get_json(silent=True) or {}
+    objetivos = body.get("objetivos")
+    if not isinstance(objetivos, dict):
+        return jsonify({"status": "error", "message": "falta 'objetivos' (objeto)"}), 400
+
+    limpio = {}
+    for ticker, obj in objetivos.items():
+        if not isinstance(obj, dict):
+            continue
+        sube = obj.get("sube")
+        baja = obj.get("baja")
+        mercado = obj.get("mercado") if obj.get("mercado") in ("CLP", "USD") else None
+        if sube is None and baja is None:
+            continue  # sin objetivo activo, no hay nada que guardar/chequear
+        limpio[ticker] = {
+            "sube": float(sube) if isinstance(sube, (int, float)) else None,
+            "baja": float(baja) if isinstance(baja, (int, float)) else None,
+            "mercado": mercado,
+        }
+
+    try:
+        with open(OBJETIVOS_FILE, "w") as f:
+            json.dump(limpio, f, indent=2)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    return jsonify({"status": "ok", "objetivos": len(limpio)})
+
+
+@app.route("/alertas-precio", methods=["GET"])
+def ver_alertas_precio():
+    """Diagnostico -- mismo token que /subscriptions. No hay datos sensibles aca."""
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    return jsonify(_leer_objetivos())
 
 
 # --------------------------------------------------------------------------
@@ -597,6 +666,63 @@ def news_endpoint():
 
 _alert_state = {}
 
+# Estado en memoria de los precios objetivo ("Mi Cartera"): guarda si CADA
+# objetivo (ticker + direccion "sube"/"baja") ya estaba cruzado en el
+# chequeo anterior, para avisar solo al ENTRAR al cruce -- mismo criterio
+# que _alert_state de arriba. Vive en memoria (no en OBJETIVOS_FILE) a
+# proposito: si se pierde en un redeploy, en el peor caso se manda UN aviso
+# de mas la primera vez que vuelve a cruzar, nunca uno de menos.
+_estado_objetivos = {}
+
+
+def _evaluar_objetivos(quotes_map, mercado):
+    """
+    Revisa los precios objetivo guardados via POST /alertas-precio contra
+    los precios actuales de ESTE mercado ('CLP' o 'USD') y dispara correo +
+    push cuando el precio CRUZA un objetivo (no en cada chequeo mientras se
+    mantenga cruzado -- igual criterio que las señales de zscore).
+
+    A diferencia del bucle de mas abajo (que solo evalua TICKERS de Chile
+    porque signals.py no tiene reglas para EE.UU.), esto corre para los dos
+    mercados: el objetivo lo pone el usuario a mano, no depende de
+    indicadores tecnicos.
+    """
+    objetivos = _leer_objetivos()
+    disparadas = []
+    for ticker, obj in objetivos.items():
+        if obj.get("mercado") and obj.get("mercado") != mercado:
+            continue
+        q = quotes_map.get(ticker)
+        precio = q.get("price") if isinstance(q, dict) else None
+        if precio is None:
+            continue
+
+        for direccion, campo in (("sube", "sube"), ("baja", "baja")):
+            objetivo = obj.get(campo)
+            if objetivo is None:
+                continue
+            cruzado_ahora = precio >= objetivo if direccion == "sube" else precio <= objetivo
+            clave = f"{ticker}:{direccion}"
+            estaba_cruzado = _estado_objetivos.get(clave, False)
+            _estado_objetivos[clave] = cruzado_ahora
+            if not (cruzado_ahora and not estaba_cruzado):
+                continue
+
+            monto = precio - objetivo
+            pct = (monto / objetivo * 100) if objetivo else None
+            try:
+                notify.send_price_target_alert(ticker, direccion, precio, objetivo, monto, pct, mercado)
+            except Exception as e:
+                print(f"[run-check] correo de objetivo {ticker}: {e}")
+            try:
+                notify.send_price_target_push(ticker, direccion, precio, objetivo, monto, pct, mercado)
+            except Exception as e:
+                print(f"[run-check] push de objetivo {ticker}: {e}")
+
+            disparadas.append({"ticker": ticker, "direccion": direccion, "precio": precio,
+                               "objetivo": objetivo, "monto": monto, "pct": pct, "mercado": mercado})
+    return disparadas
+
 
 def _direccion_senal(ev):
     """
@@ -706,11 +832,23 @@ def run_check():
                           "puntaje": ev.get("puntaje") if ev else None,
                           "banderas": len(ev.get("banderas", [])) if ev else 0})
 
+    # ---- Precios objetivo del usuario ("Mi Cartera") -----------------------
+    # Cubre Chile (con los `quotes` recien obtenidos arriba) Y EE.UU. En
+    # EE.UU. NUNCA se fuerza una descarga bloqueante de 107 tickers dentro
+    # de esta peticion (ver el bloque "POR QUE LAS ACTUALIZACIONES CORREN EN
+    # SEGUNDO PLANO" mas arriba) -- solo se pide que refresque en segundo
+    # plano si esta vencida, y se evalua con lo que haya en cache ahora
+    # mismo (puede ser de hasta PRICE_CACHE_TTL segundos atras).
+    objetivos_disparados = _evaluar_objetivos(quotes, "CLP")
+    _refrescar_precios_usa()
+    objetivos_disparados += _evaluar_objetivos(_price_cache_usa["quotes"] or {}, "USD")
+
     return jsonify({
         "estado": "ok",
         "evaluadas": len([t for t in TICKERS if t in quotes]),
         "esperadas": len(TICKERS),
         "alertas_disparadas": alertadas,
+        "objetivos_disparados": objetivos_disparados,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 

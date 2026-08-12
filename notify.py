@@ -425,3 +425,76 @@ def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None):
     )
     if enviados:
         print(f"[notify] Push enviado para {ticker} a {enviados} dispositivo(s).")
+
+
+def _fmt_monto(valor, mercado):
+    """CLP sin decimales (igual que el resto de la app), USD con 2 decimales."""
+    if mercado == "USD":
+        return f"US$ {valor:,.2f}"
+    return f"CL$ {valor:,.0f}"
+
+
+def _texto_objetivo(ticker, direccion, precio, objetivo, monto, pct, mercado):
+    """
+    Arma emoji/título/cuerpo para un cruce de precio objetivo (modulo 'Mi
+    Cartera' del frontend, NO las señales de signals.py). A diferencia de
+    send_alert()/send_push_alert() -- que comparan contra el promedio de 90
+    dias -- aca el usuario puso el numero a mano ("avisar si sube/baja a"),
+    asi que el texto siempre muestra el monto Y el porcentaje de distancia
+    respecto de ese objetivo, tal como se pidio.
+    """
+    if direccion == "sube":
+        emoji, palabra, verbo = "🎯", "alcanzó tu precio de venta", "subió a"
+    else:
+        emoji, palabra, verbo = "🔔", "alcanzó tu precio de aviso", "bajó a"
+
+    pct_txt = f"{'+' if pct is not None and pct >= 0 else ''}{pct:.1f}%" if pct is not None else "s/d"
+    titulo = f"{emoji} {ticker} {palabra}"
+    cuerpo = (
+        f"{ticker} {verbo} {_fmt_monto(precio, mercado)}. "
+        f"Tu objetivo era {_fmt_monto(objetivo, mercado)} "
+        f"({pct_txt} respecto del objetivo, {_fmt_monto(monto, mercado)} de diferencia)."
+    )
+    return titulo, cuerpo
+
+
+def send_price_target_alert(ticker, direccion, precio, objetivo, monto, pct, mercado):
+    """
+    Correo para un precio objetivo definido por el usuario en 'Mi Cartera'
+    (imagen 2 del pedido): 'sube' = precio de venta, 'baja' = aviso de
+    caída. Cubre Chile Y EE.UU. -- a diferencia de send_alert(), que hoy
+    solo corre sobre TICKERS (Chile) porque signals.py no tiene reglas para
+    EE.UU. todavia. Siempre incluye el monto Y el porcentaje de distancia.
+    """
+    if not (RESEND_API_KEY and EMAIL_TO):
+        print("[notify] Correo no configurado (falta RESEND_API_KEY o EMAIL_TO), se omite envio.")
+        return
+    titulo, cuerpo = _texto_objetivo(ticker, direccion, precio, objetivo, monto, pct, mercado)
+    body = cuerpo + f"\n\n👉 Toca aquí para ver el detalle en la app:\n{FRONTEND_URL}?ticker={ticker}"
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"from": RESEND_FROM, "to": [EMAIL_TO], "subject": titulo, "text": body},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            print(f"[notify] Resend rechazo el correo de objetivo ({resp.status_code}): {resp.text}")
+        else:
+            print(f"[notify] Correo de objetivo enviado para {ticker} (via Resend)")
+    except Exception as e:
+        print(f"[notify] Error enviando correo de objetivo via Resend: {e}")
+
+
+def send_price_target_push(ticker, direccion, precio, objetivo, monto, pct, mercado):
+    """Push para el mismo evento que send_price_target_alert(), ver esa función."""
+    titulo, cuerpo = _texto_objetivo(ticker, direccion, precio, objetivo, monto, pct, mercado)
+    url = f"{FRONTEND_URL}?ticker={ticker}"
+    enviados, fallidos, _ = enviar_push(
+        {"title": titulo, "body": cuerpo, "ticker": ticker, "url": url}
+    )
+    if enviados:
+        print(f"[notify] Push de objetivo enviado para {ticker} a {enviados} dispositivo(s).")
