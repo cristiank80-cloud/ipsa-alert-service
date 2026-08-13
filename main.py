@@ -87,4 +87,9 @@ TICKERS_USA = [
     "UNP", "LMT", "DE", "LIN",
     # Agregado a pedido: ETF sectorial de aeroespacial/defensa.
     "ITA",
+    # Agregadas a pedido (lista revisada una por una contra lo que ya
+    # estaba, solo se suman las que faltaban -- ANET y LLY ya estaban):
+    # Skyward Specialty Insurance, Ero Copper, Enova International,
+    # Paysign, WisdomTree.
+    "SKWD", "ERO", "ENVA", "PAYS", "WT",
 ]
