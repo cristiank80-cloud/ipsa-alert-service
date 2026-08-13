@@ -62,6 +62,15 @@ RSI_SOBRECOMPRA = float(os.environ.get("RSI_SOBRECOMPRA", 70))
 # existe pero no es ejecutable sin mover el precio: se marca y se castiga.
 LIQUIDEZ_MINIMA_CLP = float(os.environ.get("LIQUIDEZ_MINIMA_CLP", 150_000_000))
 
+# Mismo criterio que LIQUIDEZ_MINIMA_CLP pero en dolares, para el ambiente
+# EE.UU. (main.TICKERS_USA): ETFs grandes (VOO, VTI...) y acciones del
+# S&P 500 transan varios ordenes de magnitud mas que el promedio chileno, asi
+# que NO se puede reusar el umbral en CLP -- 150 millones de pesos son unos
+# US$150 mil, un piso absurdamente bajo para ese mercado. US$2 millones/dia
+# deja pasar cualquier nombre grande y solo filtra las acciones mas chicas
+# de la lista (ej. SKWD, ERO, ENVA, PAYS).
+LIQUIDEZ_MINIMA_USD = float(os.environ.get("LIQUIDEZ_MINIMA_USD", 2_000_000))
+
 # Fuerza relativa: diferencia entre el retorno 3M de la accion y el del
 # IPSA. Mas alla de esto, el movimiento es propio de la accion y no del
 # mercado — conviene buscar la noticia antes de actuar.
@@ -88,7 +97,7 @@ def _pct(x):
 # Evaluacion de una accion
 # --------------------------------------------------------------------------
 
-def evaluar(ticker, precio, stats, stats_indice=None):
+def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
     """
     Devuelve un dict con puntaje, clasificacion, razones y banderas rojas.
 
@@ -97,6 +106,11 @@ def evaluar(ticker, precio, stats, stats_indice=None):
              NO significa "buena inversion" — significa "esta lejos de su
              promedio hacia abajo". Puede ser una oportunidad o puede ser
              una empresa que se esta deteriorando. El puntaje no sabe cual.
+
+    `moneda`: "CLP" (default, mercado chileno) o "USD" (ambiente EE.UU.) --
+    solo cambia que umbral de liquidez se usa (ver LIQUIDEZ_MINIMA_CLP /
+    LIQUIDEZ_MINIMA_USD): son mercados de escalas de transaccion muy
+    distintas y un solo umbral no sirve para los dos.
     """
     if not stats or precio is None:
         return None
@@ -205,17 +219,19 @@ def evaluar(ticker, precio, stats, stats_indice=None):
 
     # -- 5. Liquidez --------------------------------------------------------
     monto = stats.get("montoMedioDiario30d")
+    liquidez_minima = LIQUIDEZ_MINIMA_USD if moneda == "USD" else LIQUIDEZ_MINIMA_CLP
+    sufijo_moneda = "USD" if moneda == "USD" else "CLP"
     if monto is not None:
-        if monto < LIQUIDEZ_MINIMA_CLP:
+        if monto < liquidez_minima:
             puntaje *= 0.5  # la senal existe pero no se puede ejecutar limpio
             banderas.append(
-                f"POCA LIQUIDEZ — transa en promedio ${monto/1e6:,.0f} millones "
-                f"al dia. Entrar o salir puede moverte el precio en contra, y "
-                f"el spread se come buena parte de la diferencia. El puntaje "
-                f"se redujo a la mitad por esto.")
+                f"POCA LIQUIDEZ — transa en promedio ${monto/1e6:,.1f} millones "
+                f"{sufijo_moneda} al dia. Entrar o salir puede moverte el precio "
+                f"en contra, y el spread se come buena parte de la diferencia. "
+                f"El puntaje se redujo a la mitad por esto.")
         else:
-            razones.append(f"Liquidez razonable: ~${monto/1e6:,.0f} millones "
-                           f"transados al dia (promedio 30 dias).")
+            razones.append(f"Liquidez razonable: ~${monto/1e6:,.1f} millones "
+                           f"{sufijo_moneda} transados al dia (promedio 30 dias).")
     else:
         banderas.append("Sin dato de volumen: no se pudo verificar liquidez.")
 
@@ -254,23 +270,26 @@ def evaluar(ticker, precio, stats, stats_indice=None):
     }
 
 
-def rankear(precios, stats, stats_indice=None, minimo_liquidez=True):
+def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP"):
     """
     Evalua todas las acciones y devuelve dos listas ordenadas.
 
     `candidatos_compra` NO es una lista de compras sugeridas. Es la lista de
     acciones que estan mas lejos de su propio promedio hacia abajo, con las
     banderas rojas visibles al lado de cada una para que puedas descartarlas.
+
+    `moneda`: ver evaluar() -- selecciona el umbral de liquidez correcto.
     """
     evaluadas = []
     for t, p in precios.items():
-        ev = evaluar(t, p, stats.get(t), stats_indice)
+        ev = evaluar(t, p, stats.get(t), stats_indice, moneda=moneda)
         if ev and ev.get("puntaje") is not None:
             evaluadas.append(ev)
 
+    liquidez_minima = LIQUIDEZ_MINIMA_USD if moneda == "USD" else LIQUIDEZ_MINIMA_CLP
     ejecutables = [e for e in evaluadas
                    if not minimo_liquidez
-                   or (e["montoMedioDiario30d"] or 0) >= LIQUIDEZ_MINIMA_CLP]
+                   or (e["montoMedioDiario30d"] or 0) >= liquidez_minima]
 
     compra = sorted([e for e in ejecutables if e["puntaje"] >= 20],
                     key=lambda e: -e["puntaje"])

@@ -52,7 +52,7 @@ EMAIL_TO = os.environ.get("EMAIL_TO")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://cristiank80-cloud.github.io/ipsa-app/")
 
 
-def send_alert(ticker, direccion, precio, avg, cuerpo=None):
+def send_alert(ticker, direccion, precio, avg, cuerpo=None, mercado="CLP"):
     """
     Correo de alerta BIDIRECCIONAL: 'compra' cuando el precio esta lejos
     bajo su propio promedio, 'venta' cuando esta lejos por arriba.
@@ -62,6 +62,11 @@ def send_alert(ticker, direccion, precio, avg, cuerpo=None):
     cualquier alerta). Ahora el texto se arma segun la direccion real de
     la senal, y siempre incluye un enlace directo a la tarjeta de esa
     accion en la app -- antes habia que ir a buscarla a mano entre 47.
+
+    `mercado`: "CLP" (default) o "USD" -- solo cambia el formato del monto
+    (ver _fmt_monto). Antes esto siempre mostraba el precio sin decimales
+    como si fuera CLP, incluso para las acciones de EE.UU. que llegaran a
+    usar esta funcion.
     """
     if not (RESEND_API_KEY and EMAIL_TO):
         print("[notify] Correo no configurado (falta RESEND_API_KEY o EMAIL_TO), se omite envio.")
@@ -72,11 +77,11 @@ def send_alert(ticker, direccion, precio, avg, cuerpo=None):
     else:
         emoji, palabra, prep = "📉", "posible compra", "bajo"
 
-    dist_txt, cuerpo_precio = "", f"{ticker} está en {precio:,.0f}"
+    dist_txt, cuerpo_precio = "", f"{ticker} está en {_fmt_monto(precio, mercado)}"
     if avg:
         dist = abs((precio / avg - 1) * 100)
         dist_txt = f" — {dist:.1f}% {prep} su promedio"
-        cuerpo_precio += f", un {dist:.1f}% {prep} su promedio histórico de 90 días ({avg:,.0f})"
+        cuerpo_precio += f", un {dist:.1f}% {prep} su promedio histórico de 90 días ({_fmt_monto(avg, mercado)})"
     cuerpo_precio += "."
 
     subject = f"{emoji} {ticker}: {palabra}{dist_txt}"
@@ -400,11 +405,13 @@ def enviar_push(payload_dict):
     return enviados, fallidos, detalle
 
 
-def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None):
+def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None, mercado="CLP"):
     """
     Push BIDIRECCIONAL (ver send_alert). Incluye una 'url' en el payload:
     sw.js la usa en notificationclick para abrir la app directo en la
     tarjeta de esa accion, en vez de solo enfocar la pantalla principal.
+
+    `mercado`: ver send_alert().
     """
     if direccion == "venta":
         emoji, palabra, prep = "📈", "posible venta", "sobre"
@@ -412,10 +419,10 @@ def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None):
         emoji, palabra, prep = "📉", "posible compra", "bajo"
 
     title = f"{emoji} {ticker} · {palabra}"
-    body = f"{precio:,.0f}"
+    body = _fmt_monto(precio, mercado)
     if avg:
         dist = abs((precio / avg - 1) * 100)
-        body += f" ({dist:.1f}% {prep} su promedio de {avg:,.0f})"
+        body += f" ({dist:.1f}% {prep} su promedio de {_fmt_monto(avg, mercado)})"
     if indicadores_texto:
         body += f" · {indicadores_texto}"
 

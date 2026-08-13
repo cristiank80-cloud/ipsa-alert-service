@@ -76,7 +76,7 @@ _stats_cache = {"stats": None, "indice": None, "series": None, "ts": 0}
 # mismo mecanismo que Chile, pero sin indice propio (el S&P 500 no sale de
 # fuente_df) y sin pasar por fuente_bolsa (esa API es solo Bolsa de Santiago).
 _price_cache_usa = {"quotes": None, "index": None, "ts": 0}
-_stats_cache_usa = {"stats": None, "series": None, "ts": 0}
+_stats_cache_usa = {"stats": None, "indice": None, "series": None, "ts": 0}
 # S&P 500 como referencia del ambiente 2. A diferencia del IPSA, este SI se
 # pide a Yahoo con el mecanismo generico get_market_data() -- el bug de
 # "regularMarketTime pegado" que obligo a sacar el IPSA de Yahoo era
@@ -231,12 +231,20 @@ def _refrescar_stats_usa(forzar=False):
     # Siempre en segundo plano, incluso con forzar=True -- no hay ningun
     # camino en el que valga la pena tener el servidor entero detenido un
     # minuto por las estadisticas de EE.UU.
+    #
+    # con_indice=True + index_symbol=INDEX_SYMBOL_USA (bloque "alertas EE.UU."):
+    # ahora SI se pide el S&P 500 en la misma tanda paralela, porque
+    # signals.rankear() lo necesita para la "fuerza relativa" (punto 4 de
+    # signals.py) igual que ya lo hace para Chile con el IPSA. Es una
+    # peticion mas sobre 107 (108 en total), no cambia el riesgo de 429.
     ahora = time.time()
     if forzar or _stats_cache_usa["stats"] is None or (ahora - _stats_cache_usa["ts"]) > STATS_CACHE_TTL:
         def _trabajo():
-            stats, _, series = get_stats(TICKERS_USA, suffix="", con_indice=False)
+            stats, indice, series = get_stats(TICKERS_USA, suffix="", con_indice=True,
+                                               index_symbol=INDEX_SYMBOL_USA)
             if stats:
-                _stats_cache_usa.update({"stats": stats, "series": series, "ts": time.time()})
+                _stats_cache_usa.update({"stats": stats, "indice": indice,
+                                         "series": series, "ts": time.time()})
         _en_segundo_plano("stats_usa", _trabajo)
     return _stats_cache_usa
 
@@ -559,33 +567,26 @@ def signals_endpoint():
     cada item trae sus razones y sus banderas rojas para que puedas
     descartarlo. Ver el descargo en signals.py.
 
-    NOTA (bloque 10 de la especificacion v3, "reencuadre de alertas"):
-    esto SOLO evalua las 47 acciones chilenas (TICKERS). El ambiente
-    EE.UU. (TICKERS_USA) todavia no tiene un equivalente -- signals.rankear()
-    esta escrito contra el universo y los umbrales del IPSA, y extenderlo
-    a ETFs en USD (otra escala de precio, otra volatilidad tipica, y sin
-    el mismo z-score historico) es un cambio de logica, no solo de datos,
-    que no se hizo en esta pasada.
-
-    El parametro `mercado=usa` YA se reconoce (para que el frontend, que
-    ya pide /signals?mercado=usa segun la seccion 5.1 de la spec, tenga
-    una respuesta explicita) pero de forma honesta: devuelve 404 en vez
-    de 200 con los datos de Chile mal etiquetados como si fueran de
-    EE.UU. El panel de analisis y "A seguir" del frontend ya saben
-    degradar con gracia ante ese 404 (ver renderAnalysis() y
-    renderAmbienteSeguir() en index.html). Cuando se implemente de
-    verdad, basta con reemplazar el bloque de abajo por el calculo real
-    y devolver 200 con `"mercado": "usa"` en el cuerpo. Tambien
-    pendiente: notify.py solo manda correo/push para candidatos de este
-    endpoint, asi que las alertas por correo/push de EE.UU. dependen de
-    este mismo trabajo.
+    `mercado=usa` (antes devolvia 404 a proposito -- ver INFORME.md /
+    historial de este archivo): ahora SI evalua TICKERS_USA con las mismas
+    reglas que Chile, usando el S&P 500 (^GSPC) como indice de referencia
+    para la fuerza relativa y LIQUIDEZ_MINIMA_USD en vez de
+    LIQUIDEZ_MINIMA_CLP (ver signals.py). El frontend ya estaba preparado
+    para recibir 200 aca (ver fetchSignals() en index.html) -- no hace
+    falta tocarlo.
     """
     mercado = request.args.get("mercado", "").lower()
     if mercado == "usa":
-        return jsonify({
-            "error": "signals.py todavia no evalua reglas para el mercado 'usa'",
-            "mercado": "usa",
-        }), 404
+        st = _refrescar_stats_usa()
+        pc = _refrescar_precios_usa()
+        if not pc["quotes"]:
+            return jsonify({"error": "sin precios disponibles ahora mismo",
+                            "mercado": "usa"}), 503
+        precios = {t: q["price"] for t, q in pc["quotes"].items()}
+        resultado = signals.rankear(precios, st["stats"] or {}, st.get("indice"), moneda="USD")
+        resultado["mercado"] = "usa"
+        resultado["serverTime"] = datetime.now(timezone.utc).isoformat()
+        return jsonify(resultado)
 
     st = _refrescar_stats()
     pc = _refrescar_precios()
@@ -601,20 +602,28 @@ def signals_endpoint():
 @app.route("/signal", methods=["GET"])
 def signal_uno():
     ticker = request.args.get("ticker", "").upper()
-    if ticker not in TICKERS:
+    es_usa = ticker in TICKERS_USA
+    if ticker not in TICKERS and not es_usa:
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
-    st = _refrescar_stats()
-    pc = _refrescar_precios()
+    st = _refrescar_stats_usa() if es_usa else _refrescar_stats()
+    pc = _refrescar_precios_usa() if es_usa else _refrescar_precios()
     q = (pc["quotes"] or {}).get(ticker)
     if not q:
         return jsonify({"error": "sin precio disponible para esa accion"}), 503
+    moneda = "USD" if es_usa else "CLP"
     return jsonify(signals.evaluar(ticker, q["price"],
-                                   (st["stats"] or {}).get(ticker), st["indice"]))
+                                   (st["stats"] or {}).get(ticker), st.get("indice"), moneda=moneda))
 
 
 VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y"}
 _history_cache = {}
 HISTORY_CACHE_TTL = 1800
+
+# Alias para pedir el S&P 500 (referencia del ambiente EE.UU., ver
+# INDEX_SYMBOL_USA) por /history -- mismo patron que "IPSA"/"^IPSA" para el
+# indice chileno. Lo usa el frontend para la comparacion "tu cartera vs. el
+# indice" (seccion nueva de "Mi Cartera").
+INDICE_USA_ALIASES = ("^GSPC", "SP500")
 
 
 @app.route("/history", methods=["GET"])
@@ -622,7 +631,9 @@ def history():
     ticker = request.args.get("ticker", "").upper()
     period = request.args.get("period", "3mo").lower()
     es_usa = ticker in TICKERS_USA
-    if ticker not in TICKERS and not es_usa and ticker not in ("IPSA", "^IPSA"):
+    es_indice_usa = ticker in INDICE_USA_ALIASES
+    if (ticker not in TICKERS and not es_usa
+            and ticker not in ("IPSA", "^IPSA") and not es_indice_usa):
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     if period not in VALID_PERIODS:
         return jsonify({"error": f"period debe ser uno de {sorted(VALID_PERIODS)}"}), 400
@@ -631,7 +642,7 @@ def history():
     # volver a pedirsela a Yahoo. Menos peticiones = menos rate limiting.
     # Las series de ambiente 2 viven en una cache separada (ver
     # _refrescar_stats_usa) porque no comparten ciclo con las de Chile.
-    st = _refrescar_stats_usa() if es_usa else _refrescar_stats()
+    st = _refrescar_stats_usa() if (es_usa or es_indice_usa) else _refrescar_stats()
     dias = {"1mo": 21, "3mo": 63, "6mo": 126, "ytd": None, "1y": 252}.get(period)
     serie = (st.get("series") or {}).get(ticker)
     if serie and dias and len(serie) >= dias:
@@ -642,8 +653,12 @@ def history():
     ahora = time.time()
     c = _history_cache.get(key)
     if c is None or (ahora - c["ts"]) > HISTORY_CACHE_TTL:
-        suf = "" if es_usa else None
-        _history_cache[key] = {"data": get_price_history(ticker, period, suffix=suf), "ts": ahora}
+        # get_price_history() ya sabe mapear "IPSA"/"^IPSA" -> INDEX_SYMBOL
+        # (^IPSA) internamente; para el S&P 500 se pasa el simbolo real
+        # (^GSPC) directo, porque data_source.py no conoce el alias "SP500".
+        simbolo_pedido = INDEX_SYMBOL_USA if es_indice_usa else ticker
+        suf = "" if (es_usa or es_indice_usa) else None
+        _history_cache[key] = {"data": get_price_history(simbolo_pedido, period, suffix=suf), "ts": ahora}
     return jsonify({"ticker": ticker, "period": period,
                     "points": _history_cache[key]["data"], "origen": "yahoo"})
 
@@ -665,6 +680,12 @@ def news_endpoint():
 # --------------------------------------------------------------------------
 
 _alert_state = {}
+# Mismo patron que _alert_state, pero separado para TICKERS_USA -- aunque
+# hoy ningun ticker se repite entre los dos mercados, mantenerlos aparte
+# evita que un futuro choque de simbolos (ej. alguien agrega a mano el mismo
+# nemotecnico a los dos universos) pise el estado de "compra"/"venta" del
+# otro mercado.
+_alert_state_usa = {}
 
 # Estado en memoria de los precios objetivo ("Mi Cartera"): guarda si CADA
 # objetivo (ticker + direccion "sube"/"baja") ya estaba cruzado en el
@@ -682,10 +703,10 @@ def _evaluar_objetivos(quotes_map, mercado):
     push cuando el precio CRUZA un objetivo (no en cada chequeo mientras se
     mantenga cruzado -- igual criterio que las señales de zscore).
 
-    A diferencia del bucle de mas abajo (que solo evalua TICKERS de Chile
-    porque signals.py no tiene reglas para EE.UU.), esto corre para los dos
-    mercados: el objetivo lo pone el usuario a mano, no depende de
-    indicadores tecnicos.
+    Corre para los dos mercados igual que los dos bucles de senales tecnicas
+    de mas abajo (Chile y EE.UU.): el objetivo lo pone el usuario a mano, no
+    depende de indicadores tecnicos, asi que no tiene la limitacion que
+    tenian esos bucles antes de que EE.UU. tuviera su propia evaluacion.
     """
     objetivos = _leer_objetivos()
     disparadas = []
@@ -830,7 +851,57 @@ def run_check():
 
         alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
                           "puntaje": ev.get("puntaje") if ev else None,
-                          "banderas": len(ev.get("banderas", [])) if ev else 0})
+                          "banderas": len(ev.get("banderas", [])) if ev else 0,
+                          "mercado": "CLP"})
+
+    # ---- Senales tecnicas (signals.py) para EE.UU. -------------------------
+    # Mismo criterio que el bucle de Chile de arriba (mismo _direccion_senal,
+    # mismo umbral |puntaje| >= 20), pero sobre TICKERS_USA y con la cache
+    # separada del ambiente 2. A proposito NUNCA se fuerza aca una descarga
+    # bloqueante de 107 historiales dentro del ciclo de peticion (ver el
+    # bloque "POR QUE LAS ACTUALIZACIONES CORREN EN SEGUNDO PLANO" mas
+    # arriba): _refrescar_stats_usa() sin forzar=True solo dispara un
+    # refresco en segundo plano si esta vencida la cache, y este bucle
+    # evalua con lo que YA este en cache ahora mismo (puede quedar vacio los
+    # primeros minutos despues de un despliegue, igual que le pasa hoy a
+    # /signals?mercado=usa).
+    st_usa = _refrescar_stats_usa()
+    _refrescar_precios_usa()
+    stats_usa = st_usa["stats"] or {}
+    quotes_usa_map = _price_cache_usa["quotes"] or {}
+    for t in TICKERS_USA:
+        q, s = quotes_usa_map.get(t), stats_usa.get(t)
+        if not q or not s:
+            continue
+        precio = q["price"]
+        ev = signals.evaluar(t, precio, s, st_usa.get("indice"), moneda="USD")
+        direccion = _direccion_senal(ev)
+        anterior = _alert_state_usa.get(t)
+        _alert_state_usa[t] = direccion
+        if not direccion or direccion == anterior:
+            continue
+
+        cuerpo = _texto_alerta(ev)
+        try:
+            noticias = news.get_recent_news(t)
+            if noticias:
+                cuerpo += "\n\n" + news.describe(noticias)
+        except Exception as e:
+            print(f"[run-check] noticias de {t}: {e}")
+
+        try:
+            notify.send_alert(t, direccion, precio, s.get("avg90"), cuerpo, mercado="USD")
+        except Exception as e:
+            print(f"[run-check] correo {t}: {e}")
+        try:
+            notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev), mercado="USD")
+        except Exception as e:
+            print(f"[run-check] push {t}: {e}")
+
+        alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
+                          "puntaje": ev.get("puntaje") if ev else None,
+                          "banderas": len(ev.get("banderas", [])) if ev else 0,
+                          "mercado": "USD"})
 
     # ---- Precios objetivo del usuario ("Mi Cartera") -----------------------
     # Cubre Chile (con los `quotes` recien obtenidos arriba) Y EE.UU. En
@@ -847,6 +918,8 @@ def run_check():
         "estado": "ok",
         "evaluadas": len([t for t in TICKERS if t in quotes]),
         "esperadas": len(TICKERS),
+        "evaluadas_usa": len([t for t in TICKERS_USA if t in quotes_usa_map and t in stats_usa]),
+        "esperadas_usa": len(TICKERS_USA),
         "alertas_disparadas": alertadas,
         "objetivos_disparados": objetivos_disparados,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -998,7 +1071,7 @@ def diag():
         "push": notify.vapid_diagnostico(),
         "correo_configurado": bool(os.environ.get("RESEND_API_KEY")
                                    and os.environ.get("EMAIL_TO")),
-        "modo_alerta": "compra_venta (signals.py, |puntaje| >= 20 -- mismo corte que candidatos_compra/venta)",
+        "modo_alerta": "compra_venta (signals.py, |puntaje| >= 20 -- mismo corte que candidatos_compra/venta; cubre TICKERS y TICKERS_USA)",
         "fuente_de_precios": pc.get("fuente", "(aun sin consultar)"),
         "bolsa_de_santiago": fuente_bolsa.diagnostico(),
     })

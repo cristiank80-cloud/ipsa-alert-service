@@ -359,7 +359,7 @@ def _estadisticas(puntos, dias_promedio=90):
     }
 
 
-def get_stats(tickers, dias_promedio=90, suffix=None, con_indice=True):
+def get_stats(tickers, dias_promedio=90, suffix=None, con_indice=True, index_symbol=None):
     """
     Estadisticas de todas las acciones MAS las del indice, en paralelo.
     Reemplaza a get_daily_avg() + get_returns() y ademas entrega RSI,
@@ -369,12 +369,17 @@ def get_stats(tickers, dias_promedio=90, suffix=None, con_indice=True):
     Las series se devuelven para que server.py las cachee y las reuse en
     /history y en el calculo de senales, en vez de volver a pedirlas.
 
-    `suffix`: ver get_market_data(). `con_indice=False` evita pedir
-    INDEX_SYMBOL (^IPSA) -- se usa para el ambiente 2 (EE.UU.), donde el
-    indice de referencia (S&P 500) no sale de aqui.
+    `suffix`: ver get_market_data(). `con_indice=False` evita pedir el
+    indice de referencia.
+
+    `index_symbol`: que indice pedir cuando con_indice=True. Por defecto
+    INDEX_SYMBOL (^IPSA, mercado chileno). server.py pasa "^GSPC" (S&P 500)
+    para el ambiente 2 (EE.UU.) -- mismo mecanismo, otro simbolo, sin tener
+    que duplicar esta funcion.
     """
     suf = SUFFIX if suffix is None else suffix
-    simbolos = [t + suf for t in tickers] + ([INDEX_SYMBOL] if con_indice else [])
+    idx = index_symbol or INDEX_SYMBOL
+    simbolos = [t + suf for t in tickers] + ([idx] if con_indice else [])
 
     def _uno(sym):
         return sym, _serie_diaria(sym, "1y")
@@ -391,7 +396,7 @@ def get_stats(tickers, dias_promedio=90, suffix=None, con_indice=True):
         if st:
             stats[t] = st
 
-    stats_indice = _estadisticas(series.get(INDEX_SYMBOL) or [], dias_promedio) if con_indice else None
+    stats_indice = _estadisticas(series.get(idx) or [], dias_promedio) if con_indice else None
     return stats, stats_indice, series_por_ticker
 
 
