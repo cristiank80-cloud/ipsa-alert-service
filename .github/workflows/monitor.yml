@@ -4,11 +4,32 @@ on:
   schedule:
     # /run-check: cada 10 minutos, lunes a viernes, 12:00-21:00 UTC.
     # Cubre con margen el horario de la Bolsa de Santiago (9:30-16:00 Chile).
+    # Sigue corriendo tan seguido como antes -- ya NO manda correo por cada
+    # cruce (eso lo hace /enviar-digesto mas abajo), asi que no hay costo en
+    # mantenerlo frecuente: es lo que evita perder un cruce breve.
     - cron: '*/10 12-21 * * 1-5'
-    # /resumen-diario: una vez al dia, 20:30 UTC ~ 16:30 hora Chile
-    # (horario de verano). Si Chile NO esta en horario de verano, cambia
-    # esta linea a: - cron: '30 19 * * 1-5'
-    - cron: '30 20 * * 1-5'
+
+    # /enviar-digesto: UN correo consolidado con todo lo acumulado desde el
+    # ultimo envio (ver _alertas_pendientes en server.py), a horas fijas en
+    # vez de un correo por cada alerta -- esto es lo que reemplaza los 100+
+    # correos de un dia de mercado movido.
+    #
+    # Cada 10 minutos, dentro de una ventana ancha en UTC que cubre 9:00-18:00
+    # Chile TANTO en horario de invierno (UTC-4, 13-22 UTC) COMO en horario de
+    # verano (UTC-3, 12-21 UTC) -- por eso el rango va de 12 a 22 UTC. El
+    # servidor (server.py, usando zoneinfo con la hora real de Chile) es quien
+    # decide adentro si "ahora" es una hora en punto valida y si ya se mando
+    # el correo de esa hora -- por eso llamarlo cada 10 min no genera correos
+    # de mas. Con esto, el cambio de hora de Chile (2 veces al año) YA NO
+    # requiere tocar este archivo nunca mas.
+    - cron: '*/10 12-22 * * 1-5'
+
+    # /resumen-diario: una vez al dia, ~16:00-16:59 hora Chile (ver
+    # HORA_RESUMEN_DIARIO_CHILE en server.py). 16 Chile es 20 UTC en invierno
+    # y 19 UTC en verano, asi que la ventana cubre 19-20 UTC cada 10 min; el
+    # servidor decide adentro la hora exacta y evita reenvios el mismo dia.
+    # Mismo motivo que arriba: no depende del cambio de horario de Chile.
+    - cron: '*/10 19-20 * * 1-5'
   workflow_dispatch: {}   # permite ejecutarlo a mano desde GitHub para probar
 
 jobs:
@@ -25,8 +46,21 @@ jobs:
           echo ""
           if [ "$codigo" -ge 400 ]; then exit 1; fi
 
+  digesto-alertas:
+    if: github.event.schedule == '*/10 12-22 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar a /enviar-digesto en Render
+        run: |
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" \
+            "https://ipsa-alert-service.onrender.com/enviar-digesto?token=${{ secrets.CHECK_SECRET }}")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          echo ""
+          if [ "$codigo" -ge 400 ]; then exit 1; fi
+
   resumen-diario:
-    if: github.event.schedule == '30 20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '*/10 19-20 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Llamar a /resumen-diario en Render
