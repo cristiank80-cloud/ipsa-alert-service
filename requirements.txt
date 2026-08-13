@@ -6,6 +6,15 @@ pywebpush
 feedparser
 python-dotenv
 
+# tzdata: le da a zoneinfo (stdlib, ya se usa en server.py para saber la
+# hora real de Chile en /enviar-digesto) la base de husos horarios de IANA
+# como paquete de Python puro, en vez de depender de que la imagen de Linux
+# de Render ya la traiga instalada en /usr/share/zoneinfo. Sin esto, si
+# algun dia Render cambia de imagen base y esa carpeta no viene, zoneinfo
+# tira ZoneInfoNotFoundError y /enviar-digesto se rompe -- con tzdata nunca
+# depende de eso.
+tzdata
+
 # yfinance SE SACO A PROPOSITO.
 #
 # El nuevo data_source.py habla directo con el endpoint "chart" de Yahoo

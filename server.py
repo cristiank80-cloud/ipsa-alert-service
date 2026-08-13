@@ -41,6 +41,7 @@ import json
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -687,6 +688,54 @@ _alert_state = {}
 # otro mercado.
 _alert_state_usa = {}
 
+# ---- Alertas acumuladas para el correo consolidado -------------------------
+# Antes cada senal de compra/venta y cada precio objetivo mandaba su PROPIO
+# correo apenas se disparaba. Un dia de movimiento amplio de mercado (varias
+# decenas de acciones cruzando su umbral casi juntas -- mas facil aun con
+# TICKERS_USA sumado) manda decenas de correos en minutos: eso fue lo que
+# paso el dia que se agrego el bloque de EE.UU.
+#
+# /run-check sigue corriendo tan seguido como antes (no se puede espaciar
+# sin arriesgarse a perder un cruce), pero ya NO manda correo por cada uno:
+# junta cada alerta en esta lista en memoria, y un endpoint aparte
+# (/enviar-digesto) -- llamado por el cron externo SOLO a horas fijas, ver
+# monitor.yml -- manda UN correo con todo lo acumulado desde el ultimo envio
+# y vacia la lista. El push SI sigue siendo inmediato (no se toco): son
+# notificaciones cortas que no llenan una bandeja de entrada como un correo.
+_alertas_pendientes = []
+
+# A que hora (Chile) mandar el digesto, y con que huso horario.
+#
+# ANTES esto se decidia en monitor.yml con horas fijas en UTC -- y Chile
+# cambia de huso horario dos veces al año (horario de invierno/verano), asi
+# que habia que editar el cron a mano cada vez o se empezaba a desfasar.
+#
+# AHORA la decision de "es una de las horas que corresponde" se toma ACA,
+# con la hora real de Chile via zoneinfo (America/Santiago) -- ese modulo
+# conoce el cambio de horario solo, a traves de la base de datos de husos
+# horarios de IANA (paquete `tzdata` en requirements.txt), la misma que
+# usan los sistemas operativos y los navegadores. monitor.yml solo necesita
+# llamar a /enviar-digesto seguido durante una ventana ANCHA en UTC que
+# cubra ambos horarios -- nunca mas hay que tocarlo por un cambio de hora.
+TZ_CHILE = ZoneInfo("America/Santiago")
+HORAS_DIGESTO_CHILE = set(range(9, 19))  # 9:00, 10:00, ..., 18:00
+
+# Ultima hora (Chile) en que YA se mando un digesto, para no reenviar si el
+# cron externo llama /enviar-digesto varias veces dentro de la misma hora
+# (corre cada 10 minutos). En memoria a proposito, igual que _alert_state:
+# si el servidor se reinicia a mitad de una hora ya despachada, en el peor
+# caso se manda un digesto de mas esa hora (o uno vacio) -- nunca uno de
+# menos, y de todas formas ya no son 100 correos sueltos.
+_ultima_hora_digesto_enviada = None  # "AAAA-MM-DD-HH" en hora de Chile
+
+# Mismo mecanismo que arriba, aplicado a /resumen-diario (el latido de una
+# vez al dia): antes tambien dependia de una hora fija en UTC en monitor.yml
+# con el mismo problema de horario de verano/invierno. Aca solo importa la
+# HORA (no el minuto exacto -- el cron externo puede llegar unos minutos
+# tarde) y que no se haya mandado ya hoy.
+HORA_RESUMEN_DIARIO_CHILE = 16  # ~16:30 Chile, igual que antes
+_ultimo_dia_resumen_enviado = None  # "AAAA-MM-DD" en hora de Chile
+
 # Estado en memoria de los precios objetivo ("Mi Cartera"): guarda si CADA
 # objetivo (ticker + direccion "sube"/"baja") ya estaba cruzado en el
 # chequeo anterior, para avisar solo al ENTRAR al cruce -- mismo criterio
@@ -699,9 +748,10 @@ _estado_objetivos = {}
 def _evaluar_objetivos(quotes_map, mercado):
     """
     Revisa los precios objetivo guardados via POST /alertas-precio contra
-    los precios actuales de ESTE mercado ('CLP' o 'USD') y dispara correo +
-    push cuando el precio CRUZA un objetivo (no en cada chequeo mientras se
-    mantenga cruzado -- igual criterio que las señales de zscore).
+    los precios actuales de ESTE mercado ('CLP' o 'USD') y dispara push +
+    acumula el correo cuando el precio CRUZA un objetivo (no en cada chequeo
+    mientras se mantenga cruzado -- igual criterio que las señales de zscore).
+    El correo sale consolidado por /enviar-digesto, igual que las señales.
 
     Corre para los dos mercados igual que los dos bucles de senales tecnicas
     de mas abajo (Chile y EE.UU.): el objetivo lo pone el usuario a mano, no
@@ -732,13 +782,14 @@ def _evaluar_objetivos(quotes_map, mercado):
             monto = precio - objetivo
             pct = (monto / objetivo * 100) if objetivo else None
             try:
-                notify.send_price_target_alert(ticker, direccion, precio, objetivo, monto, pct, mercado)
-            except Exception as e:
-                print(f"[run-check] correo de objetivo {ticker}: {e}")
-            try:
                 notify.send_price_target_push(ticker, direccion, precio, objetivo, monto, pct, mercado)
             except Exception as e:
                 print(f"[run-check] push de objetivo {ticker}: {e}")
+
+            _alertas_pendientes.append({
+                "tipo": "objetivo", "mercado": mercado, "ticker": ticker, "direccion": direccion,
+                "precio": precio, "objetivo": objetivo, "monto": monto, "pct": pct,
+            })
 
             disparadas.append({"ticker": ticker, "direccion": direccion, "precio": precio,
                                "objetivo": objetivo, "monto": monto, "pct": pct, "mercado": mercado})
@@ -832,22 +883,17 @@ def run_check():
         if not direccion or direccion == anterior:
             continue
 
-        cuerpo = _texto_alerta(ev)
-        try:
-            noticias = news.get_recent_news(t)
-            if noticias:
-                cuerpo += "\n\n" + news.describe(noticias)
-        except Exception as e:
-            print(f"[run-check] noticias de {t}: {e}")
-
-        try:
-            notify.send_alert(t, direccion, precio, s.get("avg90"), cuerpo)
-        except Exception as e:
-            print(f"[run-check] correo {t}: {e}")
+        # El correo YA NO sale de aca -- se acumula en _alertas_pendientes y
+        # sale consolidado por /enviar-digesto (ver ese endpoint mas abajo).
         try:
             notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev))
         except Exception as e:
             print(f"[run-check] push {t}: {e}")
+
+        _alertas_pendientes.append({
+            "tipo": "senal", "mercado": "CLP", "ticker": t, "direccion": direccion,
+            "precio": precio, "resumen": signals.describe(ev),
+        })
 
         alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
                           "puntaje": ev.get("puntaje") if ev else None,
@@ -881,22 +927,16 @@ def run_check():
         if not direccion or direccion == anterior:
             continue
 
-        cuerpo = _texto_alerta(ev)
-        try:
-            noticias = news.get_recent_news(t)
-            if noticias:
-                cuerpo += "\n\n" + news.describe(noticias)
-        except Exception as e:
-            print(f"[run-check] noticias de {t}: {e}")
-
-        try:
-            notify.send_alert(t, direccion, precio, s.get("avg90"), cuerpo, mercado="USD")
-        except Exception as e:
-            print(f"[run-check] correo {t}: {e}")
+        # Igual que en el bucle de Chile: el correo se acumula, no se manda aca.
         try:
             notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev), mercado="USD")
         except Exception as e:
             print(f"[run-check] push {t}: {e}")
+
+        _alertas_pendientes.append({
+            "tipo": "senal", "mercado": "USD", "ticker": t, "direccion": direccion,
+            "precio": precio, "resumen": signals.describe(ev),
+        })
 
         alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
                           "puntaje": ev.get("puntaje") if ev else None,
@@ -926,7 +966,129 @@ def run_check():
     })
 
 
+def _fmt_monto_digesto(valor, mercado):
+    """CLP sin decimales, USD con 2 -- mismo criterio que notify._fmt_monto,
+    copiado aca en vez de importado porque es privado de ese modulo."""
+    if mercado == "USD":
+        return f"US$ {valor:,.2f}"
+    return f"CL$ {valor:,.0f}"
+
+
+def _texto_digesto(alertas):
+    """
+    Arma el cuerpo del correo consolidado a partir de lo acumulado en
+    _alertas_pendientes desde el ultimo envio. Una linea por alerta -- con
+    varias decenas acumuladas (dia de mercado con movimiento amplio) un
+    correo con el detalle completo de cada una, como mandaba send_alert()
+    antes por separado, seria ilegible. Se agrupa por mercado y tipo para
+    poder escanearlo rapido y decidir a cuales vale la pena entrarle en la
+    app -- el detalle completo (banderas, razones) sigue disponible ahi,
+    tocando el ticker.
+    """
+    senales = [a for a in alertas if a["tipo"] == "senal"]
+    objetivos = [a for a in alertas if a["tipo"] == "objetivo"]
+
+    lineas = [f"Resumen de alertas · {datetime.now().strftime('%d/%m/%Y %H:%M')}", ""]
+
+    def _bloque_senales(titulo, mercado):
+        items = [a for a in senales if a["mercado"] == mercado]
+        if not items:
+            return []
+        out = [titulo]
+        for a in items:
+            palabra = "posible venta" if a["direccion"] == "venta" else "posible compra"
+            out.append(f"  {a['ticker']} ({palabra}): "
+                       f"{_fmt_monto_digesto(a['precio'], mercado)} · {a['resumen']}")
+        out.append("")
+        return out
+
+    lineas += _bloque_senales("SEÑALES · CHILE (CLP)", "CLP")
+    lineas += _bloque_senales("SEÑALES · EE.UU. (USD)", "USD")
+
+    if objetivos:
+        lineas.append("PRECIOS OBJETIVO ALCANZADOS")
+        for a in objetivos:
+            verbo = "subió a" if a["direccion"] == "sube" else "bajó a"
+            pct_txt = (f"{'+' if a['pct'] is not None and a['pct'] >= 0 else ''}{a['pct']:.1f}%"
+                       if a["pct"] is not None else "s/d")
+            lineas.append(f"  {a['ticker']} {verbo} {_fmt_monto_digesto(a['precio'], a['mercado'])} "
+                          f"(objetivo {_fmt_monto_digesto(a['objetivo'], a['mercado'])}, {pct_txt})")
+        lineas.append("")
+
+    lineas.append(f"👉 Abrir la app: {notify.FRONTEND_URL}")
+    lineas.append("")
+    lineas.append(signals.DESCARGO)
+    return "\n".join(lineas)
+
+
+@app.route("/enviar-digesto", methods=["GET", "POST"])
+def enviar_digesto():
+    """
+    Manda UN correo con todas las alertas (señales de compra/venta y precios
+    objetivo cruzados) acumuladas desde el último envío, y vacía la cola.
+
+    El cron externo (monitor.yml, job "digesto-alertas") llama esto seguido
+    -- cada 10 minutos, dentro de una ventana ANCHA en UTC que cubre 9:00 a
+    18:00 Chile tanto en horario de invierno como de verano. La decisión de
+    si REALMENTE corresponde mandar el correo ahora se toma AQUÍ, con la
+    hora real de Chile (ver TZ_CHILE/HORAS_DIGESTO_CHILE más arriba) -- así
+    monitor.yml no necesita editarse nunca más por el cambio de hora.
+    /run-check sigue corriendo cada 10 minutos igual que antes para no
+    perder ningún cruce; simplemente ya no manda correo él mismo (ver
+    _alertas_pendientes más arriba).
+
+    Si no se acumuló nada, NO manda correo -- evita el "sin novedades" cada
+    hora. El latido diario de /resumen-diario sigue siendo el que garantiza
+    que llegue algo aunque de verdad no haya pasado nada en el día.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+
+    global _alertas_pendientes, _ultima_hora_digesto_enviada
+
+    ahora_chile = datetime.now(TZ_CHILE)
+    # Defensivo: monitor.yml ya restringe a lunes-viernes, pero si algun dia
+    # se llama a mano (workflow_dispatch) un sabado, mejor no mandar nada.
+    if ahora_chile.weekday() >= 5 or ahora_chile.hour not in HORAS_DIGESTO_CHILE:
+        return jsonify({"estado": "fuera_de_horario", "hora_chile": ahora_chile.isoformat()})
+
+    clave_hora = ahora_chile.strftime("%Y-%m-%d-%H")
+    if clave_hora == _ultima_hora_digesto_enviada:
+        return jsonify({"estado": "ya_enviado_esta_hora", "hora_chile": ahora_chile.isoformat()})
+    _ultima_hora_digesto_enviada = clave_hora
+
+    if not _alertas_pendientes:
+        return jsonify({"estado": "sin_novedades", "enviadas": 0, "hora_chile": ahora_chile.isoformat()})
+
+    pendientes, _alertas_pendientes = _alertas_pendientes, []
+    n = len(pendientes)
+    texto = _texto_digesto(pendientes)
+    try:
+        ok = notify.send_raw_email(f"IPSA Monitor · {n} alerta{'s' if n != 1 else ''}", texto)
+    except Exception as e:
+        # No se pierden las alertas si el envío falla: vuelven a la cola
+        # para el próximo intento en vez de desaparecer en silencio.
+        _alertas_pendientes = pendientes + _alertas_pendientes
+        print(f"[enviar-digesto] fallo el envio: {e}")
+        return jsonify({"estado": "error_envio", "detalle": str(e)}), 500
+
+    if not ok:
+        # send_raw_email devuelve False (sin excepcion) cuando el correo no
+        # esta configurado (falta RESEND_API_KEY o EMAIL_TO) -- mismo caso,
+        # se reencolan para cuando se configure.
+        _alertas_pendientes = pendientes + _alertas_pendientes
+
+    return jsonify({"estado": "enviado" if ok else "no_configurado", "enviadas": n})
+
+
 def _texto_alerta(ev):
+    """
+    Cuerpo detallado (banderas + razones + glosario) para una alerta
+    individual. Ya no se usa desde /run-check (que ahora acumula un resumen
+    de una linea en _alertas_pendientes, ver _texto_digesto) -- se deja
+    definida por si algun dia se quiere un correo de detalle a pedido para
+    un ticker puntual.
+    """
     if not ev:
         return ""
     lineas = []
@@ -959,10 +1121,26 @@ def resumen_diario():
     nada" o "esta todo roto". Con esto, si un dia no llega el resumen, ya
     sabes que hay que revisar el servicio.
 
-    Programalo en el cron externo una vez al dia, despues del cierre.
+    El cron externo llama esto seguido dentro de una ventana ancha en UTC
+    (ver monitor.yml) -- la hora real de Chile (HORA_RESUMEN_DIARIO_CHILE)
+    decide aca adentro si corresponde mandarlo, igual que /enviar-digesto,
+    asi que tampoco necesita tocarse por el cambio de horario.
     """
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
         return jsonify({"error": "no autorizado"}), 401
+
+    global _ultimo_dia_resumen_enviado
+    ahora_chile = datetime.now(TZ_CHILE)
+    hoy = ahora_chile.strftime("%Y-%m-%d")
+    if ahora_chile.weekday() >= 5 or ahora_chile.hour != HORA_RESUMEN_DIARIO_CHILE:
+        return jsonify({"estado": "fuera_de_horario", "hora_chile": ahora_chile.isoformat()})
+    if hoy == _ultimo_dia_resumen_enviado:
+        return jsonify({"estado": "ya_enviado_hoy", "hora_chile": ahora_chile.isoformat()})
+    # Se marca ANTES de intentar (no solo si sale bien): la ventana del cron
+    # dura mas de una hora y _refrescar_stats(forzar=True) bloquea -- no
+    # conviene reintentarlo cada 10 minutos toda la ventana si Yahoo esta
+    # caido. Si falla, igual llega el correo de "resumen SIN DATOS" de abajo.
+    _ultimo_dia_resumen_enviado = hoy
 
     st = _refrescar_stats(forzar=True)
     quotes, index, _fuente = _obtener_precios()
@@ -1072,6 +1250,12 @@ def diag():
         "correo_configurado": bool(os.environ.get("RESEND_API_KEY")
                                    and os.environ.get("EMAIL_TO")),
         "modo_alerta": "compra_venta (signals.py, |puntaje| >= 20 -- mismo corte que candidatos_compra/venta; cubre TICKERS y TICKERS_USA)",
+        "alertas_pendientes_de_correo": len(_alertas_pendientes),
+        "ultima_hora_digesto_enviada": _ultima_hora_digesto_enviada,
+        "hora_chile_ahora": datetime.now(TZ_CHILE).isoformat(),
+        "aviso_digesto": ("El correo de senales/objetivos ya NO sale de /run-check: se acumula aca y "
+                          "sale consolidado desde /enviar-digesto, de 9:00 a 18:00 Chile cada hora en "
+                          "punto (hora real via zoneinfo, no requiere ajuste por horario de verano)."),
         "fuente_de_precios": pc.get("fuente", "(aun sin consultar)"),
         "bolsa_de_santiago": fuente_bolsa.diagnostico(),
     })
