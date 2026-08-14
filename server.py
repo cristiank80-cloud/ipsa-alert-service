@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from data_source import get_market_data, get_stats, get_price_history
+from data_source import get_market_data, get_stats, get_price_history, get_rango_5y
 from main import TICKERS, TICKERS_USA
 import fuente_bolsa
 import fuente_df
@@ -89,6 +89,15 @@ _stats_cache_usa = {"stats": None, "indice": None, "series": None, "ts": 0}
 INDEX_SYMBOL_USA = "^GSPC"
 _news_cache = {}
 NEWS_CACHE_TTL = 1800
+
+# Rango de 5 años (min/max) para la franja nueva de la tarjeta de lista.
+# Cache PROPIA y separada de _stats_cache/_stats_cache_usa (que solo piden
+# 1 año) porque 5 años de historial por accion es varias veces mas pesado
+# -- ver el comentario en get_rango_5y() de data_source.py. TTL de un dia:
+# el minimo/maximo de 5 años no cambia de una hora a otra, asi que no vale
+# la pena refrescarlo en el mismo ciclo de 30 min que precios/stats.
+RANGO5Y_CACHE_TTL = 24 * 3600
+_rango5y_cache = {"chile": {"data": None, "ts": 0}, "usa": {"data": None, "ts": 0}}
 
 # Salud del servicio: lo que permite distinguir "no paso nada" de "esta roto".
 _salud = {
@@ -264,6 +273,29 @@ def _refrescar_precios_usa(forzar=False):
                 print("[server] get_market_data (USA) no devolvio nada; se conserva la cache anterior.")
         _en_segundo_plano("precios_usa", _trabajo)
     return _price_cache_usa
+
+
+def _refrescar_rango5y(mercado):
+    """
+    mercado: "chile" o "usa". Mismo patron que _refrescar_stats_usa --
+    SIEMPRE en segundo plano (nunca bloquea la peticion), y si todavia no
+    hay nada en cache, /rango5y devuelve data=None y el frontend se queda
+    sin esa franja hasta el proximo refresco, en vez de esperar.
+    """
+    cache = _rango5y_cache[mercado]
+    ahora = time.time()
+    if cache["data"] is not None and (ahora - cache["ts"]) <= RANGO5Y_CACHE_TTL:
+        return cache
+
+    def _trabajo():
+        if mercado == "usa":
+            data = get_rango_5y(TICKERS_USA, suffix="")
+        else:
+            data = get_rango_5y(TICKERS)
+        if data:
+            cache.update({"data": data, "ts": time.time()})
+    _en_segundo_plano(f"rango5y_{mercado}", _trabajo)
+    return cache
 
 
 # --------------------------------------------------------------------------
@@ -598,6 +630,21 @@ def signals_endpoint():
     resultado = signals.rankear(precios, st["stats"] or {}, st["indice"])
     resultado["serverTime"] = datetime.now(timezone.utc).isoformat()
     return jsonify(resultado)
+
+
+@app.route("/rango5y", methods=["GET"])
+def rango5y_endpoint():
+    """
+    Minimo y maximo de cierre de 5 años por ticker, para la franja "Rango 5
+    años" de la tarjeta de lista (ver get_rango_5y() en data_source.py y
+    _refrescar_rango5y() mas arriba). Igual que /signals, nunca bloquea: si
+    todavia no hay nada calculado devuelve data=null y dispara el calculo
+    en segundo plano, y el frontend simplemente omite esa franja hasta el
+    proximo refresco.
+    """
+    mercado = "usa" if request.args.get("mercado", "").lower() == "usa" else "chile"
+    cache = _refrescar_rango5y(mercado)
+    return jsonify({"mercado": mercado, "data": cache["data"], "ts": cache["ts"]})
 
 
 @app.route("/signal", methods=["GET"])

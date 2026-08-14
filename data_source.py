@@ -460,6 +460,40 @@ def get_returns(tickers):
             for t, s in stats.items()}
 
 
+def get_rango_5y(tickers, suffix=None):
+    """
+    Minimo y maximo de cierre de los ultimos 5 años, por ticker.
+
+    Es una peticion APARTE de get_stats() (que solo pide 1 año) a proposito:
+    5 años de historial por accion es varias veces mas pesado que 1, y esto
+    se usa solo para una franja "rango 5 años" en la tarjeta -- no vale la
+    pena cargar ese peso en el ciclo de 30 min que ya esta ajustado para no
+    saturar al unico worker de Render (ver el comentario largo sobre esto
+    en el encabezado del archivo y en server.py). server.py cachea el
+    resultado de esta funcion por separado, con un TTL de un dia: el
+    minimo/maximo de 5 años prácticamente no cambia de una hora a otra.
+
+    `suffix`: igual que en get_market_data() -- "" para tickers de EE.UU.
+    """
+    suf = SUFFIX if suffix is None else suffix
+    simbolos = [t + suf for t in tickers]
+
+    def _uno(sym):
+        return sym, _serie_diaria(sym, "5y")
+
+    series = dict(_en_paralelo(_uno, simbolos))
+
+    rangos = {}
+    for t in tickers:
+        puntos = series.get(t + suf) or []
+        cierres = [p["close"] for p in puntos if p.get("close") is not None]
+        if not cierres:
+            continue
+        rangos[t] = {"min5y": min(cierres), "max5y": max(cierres),
+                     "diasDeHistorial5y": len(cierres)}
+    return rangos
+
+
 def get_bid_ask(tickers):
     """
     ELIMINADO A PROPOSITO.

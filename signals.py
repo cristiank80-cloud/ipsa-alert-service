@@ -175,12 +175,17 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
             razones.append(f"RSI(14) en {rsi}: zona neutra.")
 
     # -- 3. Tendencia: retroceso sano vs. caida libre -----------------------
+    # `tendencia` es la version resumida (alcista/bajista/neutra) de esta
+    # misma logica, para que el frontend pueda pintar un icono en la
+    # tarjeta de lista sin tener que interpretar el texto de las razones.
     sma20, sma50 = stats.get("sma20"), stats.get("sma50")
+    tendencia = "neutra"
     if sma20 and sma50:
         if precio < sma50 and sma20 < sma50:
             # Precio bajo la media larga Y media corta por debajo de la larga:
             # la caida no es un bache, es la direccion.
             puntaje -= 25
+            tendencia = "bajista"
             banderas.append(
                 "CAIDA SOSTENIDA — el precio esta bajo su media de 50 dias y "
                 "la media de 20 va por debajo de la de 50. Barato aqui puede "
@@ -188,11 +193,13 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
                 "una oportunidad detectada: es una accion cayendo.")
         elif precio < sma20 and sma20 > sma50:
             puntaje += 15
+            tendencia = "alcista"
             razones.append(
                 "Retroceso dentro de una tendencia alcista: el precio cedio "
                 "bajo su media de 20 dias, pero la media de 20 sigue sobre la "
                 "de 50.")
         elif precio > sma20 > sma50:
+            tendencia = "alcista"
             razones.append("Tendencia alcista intacta (precio > SMA20 > SMA50).")
 
     # -- 4. Fuerza relativa contra el IPSA ----------------------------------
@@ -259,8 +266,11 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
         "precio": precio,
         "puntaje": puntaje,
         "clasificacion": clasif,
+        "tendencia": tendencia,
         "zscore": round(z, 2) if z is not None else None,
         "rsi14": rsi,
+        "ret3m": stats.get("ret3m"),
+        "ret1y": stats.get("ret1y"),
         "distanciaPromedio": _pct(precio / stats["avg90"] - 1) if stats.get("avg90") else None,
         "volatilidadDiaria": _pct(stats.get("volDiaria")),
         "montoMedioDiario30d": monto,
@@ -301,6 +311,11 @@ def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP
         "candidatos_venta": venta,
         "evaluadas": len(evaluadas),
         "filtradas_por_liquidez": len(evaluadas) - len(ejecutables),
+        # A diferencia de candidatos_compra/venta (solo |puntaje| >= 20),
+        # esto trae TODAS las acciones evaluadas, incluidas las neutras --
+        # lo usa la tarjeta de lista del frontend para mostrar puntaje/RSI/
+        # tendencia de cada accion, no solo de las que ya cruzaron un umbral.
+        "evaluadas_detalle": evaluadas,
         "descargo": DESCARGO,
     }
 
