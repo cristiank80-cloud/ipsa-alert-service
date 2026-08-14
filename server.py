@@ -616,7 +616,11 @@ def signal_uno():
                                    (st["stats"] or {}).get(ticker), st.get("indice"), moneda=moneda))
 
 
-VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y"}
+VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"}
+# "8y" NO esta aca a proposito: Yahoo Finance no tiene ese rango nativo (sus
+# rangos validos son 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max). El boton "8A"
+# del frontend pide "10y" y recorta los ultimos 8 años en el navegador --
+# mismo truco que ya usaba el rango personalizado Desde/Hasta.
 _history_cache = {}
 HISTORY_CACHE_TTL = 1800
 
