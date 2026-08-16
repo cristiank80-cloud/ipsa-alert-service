@@ -46,7 +46,8 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from data_source import get_market_data, get_stats, get_price_history, get_rango_5y
+from data_source import (get_market_data, get_stats, get_price_history,
+                         get_rango_5y, get_proximos_reportes)
 from main import TICKERS, TICKERS_USA
 import fuente_bolsa
 import fuente_df
@@ -98,6 +99,14 @@ NEWS_CACHE_TTL = 1800
 # la pena refrescarlo en el mismo ciclo de 30 min que precios/stats.
 RANGO5Y_CACHE_TTL = 24 * 3600
 _rango5y_cache = {"chile": {"data": None, "ts": 0}, "usa": {"data": None, "ts": 0}}
+
+# Proximo reporte de resultados por ticker (ver get_proximos_reportes en
+# data_source.py). Cache de 12h: una fecha de earnings no cambia de una hora
+# a otra, y son 107+ peticiones extra a Yahoo, asi que no tiene sentido
+# pedirlas en el ciclo de precios. Solo EE.UU. por ahora: Yahoo casi nunca
+# publica calendarEvents para los nemotecnicos de la Bolsa de Santiago.
+REPORTES_CACHE_TTL = 12 * 3600
+_reportes_cache = {"usa": {"data": None, "ts": 0}}
 
 # Salud del servicio: lo que permite distinguir "no paso nada" de "esta roto".
 _salud = {
@@ -295,6 +304,26 @@ def _refrescar_rango5y(mercado):
         if data:
             cache.update({"data": data, "ts": time.time()})
     _en_segundo_plano(f"rango5y_{mercado}", _trabajo)
+    return cache
+
+
+def _refrescar_reportes_usa():
+    """
+    Fechas del proximo reporte de resultados para TICKERS_USA. Mismo patron
+    que _refrescar_rango5y: siempre en segundo plano, y si todavia no hay
+    nada, signals.rankear() simplemente no marca ningun reporte (en vez de
+    esperar). Nunca bloquea la peticion.
+    """
+    cache = _reportes_cache["usa"]
+    ahora = time.time()
+    if cache["data"] is not None and (ahora - cache["ts"]) <= REPORTES_CACHE_TTL:
+        return cache
+
+    def _trabajo():
+        data = get_proximos_reportes(TICKERS_USA, suffix="")
+        if data:
+            cache.update({"data": data, "ts": time.time()})
+    _en_segundo_plano("reportes_usa", _trabajo)
     return cache
 
 
@@ -616,7 +645,9 @@ def signals_endpoint():
             return jsonify({"error": "sin precios disponibles ahora mismo",
                             "mercado": "usa"}), 503
         precios = {t: q["price"] for t, q in pc["quotes"].items()}
-        resultado = signals.rankear(precios, st["stats"] or {}, st.get("indice"), moneda="USD")
+        reportes = _refrescar_reportes_usa()["data"] or {}
+        resultado = signals.rankear(precios, st["stats"] or {}, st.get("indice"),
+                                    moneda="USD", reportes=reportes)
         resultado["mercado"] = "usa"
         resultado["serverTime"] = datetime.now(timezone.utc).isoformat()
         return jsonify(resultado)
@@ -659,8 +690,10 @@ def signal_uno():
     if not q:
         return jsonify({"error": "sin precio disponible para esa accion"}), 503
     moneda = "USD" if es_usa else "CLP"
+    reporte = (_refrescar_reportes_usa()["data"] or {}).get(ticker) if es_usa else None
     return jsonify(signals.evaluar(ticker, q["price"],
-                                   (st["stats"] or {}).get(ticker), st.get("indice"), moneda=moneda))
+                                   (st["stats"] or {}).get(ticker), st.get("indice"),
+                                   moneda=moneda, reporte=reporte))
 
 
 VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"}

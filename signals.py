@@ -42,6 +42,7 @@ parece mal puesto, cambialo — esa es justamente la idea de que las reglas
 sean explicitas.
 """
 import os
+import time
 
 # --------------------------------------------------------------------------
 # Umbrales — cambialos aqui, no repartidos por el codigo
@@ -79,6 +80,17 @@ FR_DIVERGENCIA = float(os.environ.get("FR_DIVERGENCIA", 0.10))  # 10 puntos
 # Historial minimo para que el z-score signifique algo.
 DIAS_MINIMOS = int(os.environ.get("DIAS_MINIMOS_SENAL", 60))
 
+# Cuantos dias habiles despues de un salto grande (ver gapPct/gapDiasAtras en
+# data_source.py) se sigue considerando que lo que movio el precio fue ESE
+# evento y no una tendencia nueva. ~3 semanas de bolsa: suficiente para que
+# un reporte de resultados deje de dominar la lectura tecnica.
+DIAS_GAP_RECIENTE = int(os.environ.get("DIAS_GAP_RECIENTE", 15))
+
+# Ventana antes de un reporte de resultados en la que las señales tecnicas
+# se marcan como "no accionables": el evento domina cualquier lectura de
+# precio, asi que la señal puede ser correcta y aun asi ser mala idea.
+DIAS_ANTES_REPORTE = int(os.environ.get("DIAS_ANTES_REPORTE", 7))
+
 DESCARGO = (
     "Esto no es una recomendacion de compra ni de venta, ni una prediccion. "
     "Es un resumen de reglas estadisticas sobre el comportamiento pasado. "
@@ -97,7 +109,7 @@ def _pct(x):
 # Evaluacion de una accion
 # --------------------------------------------------------------------------
 
-def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
+def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP", reporte=None):
     """
     Devuelve un dict con puntaje, clasificacion, razones y banderas rojas.
 
@@ -111,6 +123,11 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
     solo cambia que umbral de liquidez se usa (ver LIQUIDEZ_MINIMA_CLP /
     LIQUIDEZ_MINIMA_USD): son mercados de escalas de transaccion muy
     distintas y un solo umbral no sirve para los dos.
+
+    `reporte`: {"fecha": "YYYY-MM-DD", "epoch": ...} del proximo reporte de
+    resultados, si se conoce (ver get_proximos_reportes en data_source.py).
+    Una señal a pocos dias de un reporte no se borra, pero SI se marca: el
+    evento domina cualquier lectura tecnica.
     """
     if not stats or precio is None:
         return None
@@ -129,32 +146,57 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
     razones, banderas = [], []
     puntaje = 0.0
 
-    # -- 1. Distancia al propio promedio, normalizada por volatilidad -------
+    # -- 1. Extension: distancia a su propia LINEA DE TENDENCIA -------------
+    # Ojo: `zscore` ya NO es la distancia al promedio plano de 90 dias, sino
+    # a la recta de regresion de esa ventana (ver _extension_regresion() en
+    # data_source.py). El cambio importa: una accion en alza sostenida esta
+    # SIEMPRE sobre su promedio movil -- eso es la definicion de tendencia,
+    # no una anomalia -- y el modelo anterior la castigaba por eso.
     z = stats.get("zscore")
+    por_regresion = stats.get("zscoreMetodo") == "regresion"
+    ancla = "linea de tendencia" if por_regresion else "promedio de 90 dias"
     if z is not None:
         # +40 puntos como maximo, saturando en 3 sigma.
         puntaje += max(-40.0, min(40.0, -z * (40.0 / 3.0)))
         dist_pct = _pct(precio / stats["avg90"] - 1) if stats.get("avg90") else None
         if z <= Z_COMPRA_FUERTE:
             razones.append(
-                f"Esta {abs(z):.1f} desviaciones BAJO su promedio de 90 dias "
-                f"({dist_pct}%). Para esta accion en particular, eso es un "
-                f"nivel poco frecuente.")
+                f"Esta {abs(z):.1f} desviaciones BAJO su {ancla} "
+                f"({dist_pct}% respecto del promedio de 90 dias). Para esta "
+                f"accion en particular, eso es un nivel poco frecuente.")
         elif z <= Z_COMPRA_ATENCION:
             razones.append(
-                f"Esta {abs(z):.1f} desviaciones bajo su promedio de 90 dias "
-                f"({dist_pct}%).")
+                f"Esta {abs(z):.1f} desviaciones bajo su {ancla} "
+                f"({dist_pct}% respecto del promedio de 90 dias).")
         elif z >= Z_VENTA_FUERTE:
             razones.append(
-                f"Esta {z:.1f} desviaciones SOBRE su promedio de 90 dias "
-                f"({dist_pct}%). Historicamente se ha estirado poco mas que esto.")
+                f"Esta {z:.1f} desviaciones SOBRE su {ancla} "
+                f"({dist_pct}% respecto del promedio de 90 dias). "
+                f"Historicamente se ha estirado poco mas que esto.")
         elif z >= Z_VENTA_ATENCION:
             razones.append(
-                f"Esta {z:.1f} desviaciones sobre su promedio de 90 dias "
-                f"({dist_pct}%).")
+                f"Esta {z:.1f} desviaciones sobre su {ancla} "
+                f"({dist_pct}% respecto del promedio de 90 dias).")
         else:
-            razones.append(f"Cerca de su promedio de 90 dias ({dist_pct}%). "
-                           f"Sin senal por este criterio.")
+            razones.append(
+                f"En linea con su {ancla} ({dist_pct}% respecto del promedio "
+                f"de 90 dias). Sin senal por este criterio.")
+
+        # La pendiente dice si el ancla MISMA va subiendo o bajando. Es
+        # informacion que el z solo no entrega: z=0 con pendiente +0.4%/dia
+        # ("acompaña una tendencia alcista ordenada") es una situacion muy
+        # distinta de z=0 con pendiente -0.4%/dia.
+        pend = stats.get("pendientePct")
+        if pend is not None and por_regresion:
+            if pend >= 0.05:
+                razones.append(f"Su linea de tendencia de 90 dias sube "
+                               f"{pend:.2f}% por dia.")
+            elif pend <= -0.05:
+                razones.append(f"Su linea de tendencia de 90 dias baja "
+                               f"{abs(pend):.2f}% por dia.")
+            else:
+                razones.append("Su linea de tendencia de 90 dias esta "
+                               "practicamente plana.")
 
     # -- 2. RSI sobre cierres diarios reales --------------------------------
     # (Antes el RSI se calculaba en el celular sobre los datos que llegaban
@@ -180,17 +222,40 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
     # tarjeta de lista sin tener que interpretar el texto de las razones.
     sma20, sma50 = stats.get("sma20"), stats.get("sma50")
     tendencia = "neutra"
+
+    # ¿La ruptura de medias viene de un GAP reciente (un evento puntual) o
+    # de un deterioro sostenido? Si el mayor movimiento diario de los
+    # ultimos 60 dias fue un salto de 3+ sigmas y ocurrio hace poco, lo que
+    # rompio las medias fue ESE dia, no una tendencia. Leerlo como "caida
+    # sostenida" es un falso negativo (caso CSCO: cayo el dia despues de un
+    # reporte que batio expectativas, y el modelo lo marco -37).
+    gap_pct = stats.get("gapPct")
+    gap_dias = stats.get("gapDiasAtras")
+    hubo_evento = (gap_pct is not None and gap_dias is not None
+                   and gap_dias <= DIAS_GAP_RECIENTE)
+
     if sma20 and sma50:
         if precio < sma50 and sma20 < sma50:
-            # Precio bajo la media larga Y media corta por debajo de la larga:
-            # la caida no es un bache, es la direccion.
-            puntaje -= 25
-            tendencia = "bajista"
-            banderas.append(
-                "CAIDA SOSTENIDA — el precio esta bajo su media de 50 dias y "
-                "la media de 20 va por debajo de la de 50. Barato aqui puede "
-                "seguir abaratandose. Un puntaje alto en esta situacion NO es "
-                "una oportunidad detectada: es una accion cayendo.")
+            if hubo_evento:
+                # Se informa, pero NO se castiga como tendencia: el gap ya
+                # esta reflejado en el precio y en el z de extension.
+                tendencia = "evento"
+                razones.append(
+                    f"Rompio sus medias, pero el movimiento viene de un salto "
+                    f"de {_pct(gap_pct)}% hace {gap_dias} dias habiles "
+                    f"(tipico de un reporte o una noticia puntual), no de un "
+                    f"deterioro sostenido. Se evalua como evento, no como "
+                    f"cambio de tendencia.")
+            else:
+                # Precio bajo la media larga Y media corta por debajo de la larga:
+                # la caida no es un bache, es la direccion.
+                puntaje -= 25
+                tendencia = "bajista"
+                banderas.append(
+                    "CAIDA SOSTENIDA — el precio esta bajo su media de 50 dias y "
+                    "la media de 20 va por debajo de la de 50. Barato aqui puede "
+                    "seguir abaratandose. Un puntaje alto en esta situacion NO es "
+                    "una oportunidad detectada: es una accion cayendo.")
         elif precio < sma20 and sma20 > sma50:
             puntaje += 15
             tendencia = "alcista"
@@ -223,6 +288,28 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
             razones.append(
                 f"Se movio parecido al IPSA en 3 meses (diferencia "
                 f"{_pct(fr)} puntos): lo suyo es mercado, no algo propio.")
+
+    # -- 4b. Proximidad a un reporte de resultados --------------------------
+    # No cambia el puntaje: la lectura tecnica sigue siendo la que es. Lo
+    # que cambia es si es ACCIONABLE. A pocos dias de un reporte, el evento
+    # domina el precio y cualquier señal previa puede darse vuelta entera en
+    # una sola sesion. Antes la app decia "puntaje -21" sin mencionar que la
+    # empresa reportaba el lunes -- justo el dato que cambia la decision.
+    dias_a_reporte = None
+    if reporte and reporte.get("epoch"):
+        faltan = (reporte["epoch"] - time.time()) / 86400.0
+        if faltan >= 0:
+            dias_a_reporte = int(faltan)
+            if dias_a_reporte <= DIAS_ANTES_REPORTE:
+                banderas.append(
+                    f"REPORTA EN {dias_a_reporte} DIA{'S' if dias_a_reporte != 1 else ''} "
+                    f"({reporte.get('fecha')}) — un reporte de resultados mueve el "
+                    f"precio mucho mas que cualquier señal tecnica, y puede darla "
+                    f"vuelta completa en una sesion. Esta lectura no es accionable "
+                    f"hasta despues del reporte.")
+            else:
+                razones.append(f"Proximo reporte de resultados: {reporte.get('fecha')} "
+                               f"(en {dias_a_reporte} dias).")
 
     # -- 5. Liquidez --------------------------------------------------------
     monto = stats.get("montoMedioDiario30d")
@@ -268,6 +355,16 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
         "clasificacion": clasif,
         "tendencia": tendencia,
         "zscore": round(z, 2) if z is not None else None,
+        # Contra que se comparo el precio: "regresion" (linea de tendencia,
+        # el metodo bueno) o "promedio" (media plana, respaldo cuando la
+        # regresion no se pudo calcular). Que la app pueda decirlo evita que
+        # el usuario tenga que adivinar que significa el numero.
+        "zscoreMetodo": stats.get("zscoreMetodo"),
+        "pendientePct": stats.get("pendientePct"),
+        "gapPct": stats.get("gapPct"),
+        "gapDiasAtras": stats.get("gapDiasAtras"),
+        "diasAReporte": dias_a_reporte,
+        "fechaReporte": (reporte or {}).get("fecha"),
         "rsi14": rsi,
         "ret3m": stats.get("ret3m"),
         "ret1y": stats.get("ret1y"),
@@ -280,7 +377,8 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP"):
     }
 
 
-def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP"):
+def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP",
+            reportes=None):
     """
     Evalua todas las acciones y devuelve dos listas ordenadas.
 
@@ -290,9 +388,11 @@ def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP
 
     `moneda`: ver evaluar() -- selecciona el umbral de liquidez correcto.
     """
+    reportes = reportes or {}
     evaluadas = []
     for t, p in precios.items():
-        ev = evaluar(t, p, stats.get(t), stats_indice, moneda=moneda)
+        ev = evaluar(t, p, stats.get(t), stats_indice, moneda=moneda,
+                     reporte=reportes.get(t))
         if ev and ev.get("puntaje") is not None:
             evaluadas.append(ev)
 

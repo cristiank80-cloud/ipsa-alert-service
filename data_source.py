@@ -308,6 +308,63 @@ def _desv_estandar(valores):
     return math.sqrt(var)
 
 
+def _extension_regresion(cierres):
+    """
+    Distancia del ULTIMO precio a su propia LINEA DE TENDENCIA (regresion
+    lineal por minimos cuadrados sobre la ventana), medida en desviaciones
+    estandar de los residuos.
+
+    POR QUE ESTO Y NO LA DISTANCIA AL PROMEDIO
+    ==========================================
+    El z-score contra un promedio PLANO (avg90) tiene un problema
+    matematico: una accion en tendencia alcista sostenida esta SIEMPRE por
+    encima de su promedio movil. Eso no es una anomalia, es la definicion
+    de tendencia. El modelo terminaba castigando a una ganadora por hacer
+    exactamente lo que se espera de ella (caso PANW: -40% de puntaje por
+    estar 40% sobre su media, cuando venia subiendo ordenadamente).
+
+    Comparar contra la RECTA de regresion responde la pregunta correcta:
+    "esta por encima de SU PROPIA TENDENCIA", no "esta por encima de un
+    promedio que la tendencia dejo atras hace rato".
+
+    Devuelve (z, pendiente_pct):
+      z             cuantas sigmas sobre/bajo su linea de tendencia esta hoy
+      pendiente_pct cuanto sube (o baja) la tendencia por dia, en % del
+                    precio medio -- dato nuevo que antes no existia: dice si
+                    el ancla misma va subiendo.
+
+    Implementado en Python puro a proposito: numpy/pandas se sacaron de
+    este proyecto (ver requirements.txt) porque hacian lento el arranque en
+    frio de Render, que es el cuello de botella real de la app.
+    """
+    n = len(cierres)
+    if n < 5:
+        return None, None
+
+    # Minimos cuadrados sobre x = 0..n-1. Las formulas cerradas evitan
+    # tener que traer numpy solo para un polyfit de grado 1.
+    sx = n * (n - 1) / 2.0
+    sxx = (n - 1) * n * (2 * n - 1) / 6.0
+    sy = sum(cierres)
+    sxy = sum(i * c for i, c in enumerate(cierres))
+
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return None, None
+    pendiente = (n * sxy - sx * sy) / denom
+    intercepto = (sy - pendiente * sx) / n
+
+    residuos = [c - (pendiente * i + intercepto) for i, c in enumerate(cierres)]
+    sigma = _desv_estandar(residuos)
+    if not sigma or sigma <= 0:
+        return None, None
+
+    z = residuos[-1] / sigma
+    media = sy / n
+    pendiente_pct = (pendiente / media * 100) if media else None
+    return z, pendiente_pct
+
+
 def _estadisticas(puntos, dias_promedio=90):
     """
     Todo lo que se puede sacar de una serie anual, calculado una sola vez.
@@ -340,18 +397,54 @@ def _estadisticas(puntos, dias_promedio=90):
     ret_3m = (ultimo / cierres[i3m] - 1) if cierres[i3m] else None
     ret_1y = (ultimo / cierres[0] - 1) if cierres[0] else None
 
+    # Ancla nueva: distancia a la LINEA DE TENDENCIA, no al promedio plano.
+    # Ver _extension_regresion() para el porque completo.
+    z_reg, pendiente_pct = _extension_regresion(ventana)
+
+    # -- Movimiento por evento (gap) ---------------------------------------
+    # Busca el mayor salto diario de los ultimos 60 dias. Si supera 3 veces
+    # la volatilidad diaria tipica, es casi seguro un evento puntual (un
+    # reporte de resultados, una noticia) y NO una tendencia sostenida.
+    # Sin esto, el modulo de tendencia lee el gap de un dia como "cambio de
+    # regimen" y castiga a una accion que solo reacciono a su reporte (caso
+    # CSCO: -37 de puntaje por romper sus medias al dia siguiente de un
+    # reporte que batio expectativas).
+    gap_pct, gap_dias_atras = None, None
+    retornos_60 = retornos[-60:] if len(retornos) >= 5 else []
+    if retornos_60 and vol_diaria and vol_diaria > 0:
+        idx_max = max(range(len(retornos_60)), key=lambda i: abs(retornos_60[i]))
+        mayor = retornos_60[idx_max]
+        if abs(mayor) >= 3 * vol_diaria:
+            gap_pct = mayor
+            gap_dias_atras = len(retornos_60) - 1 - idx_max
+
     return {
         "avg90": avg,
         "sd90": sd,
-        # Cuantas desviaciones estandar bajo su propio promedio esta hoy.
-        # Este es el numero que reemplaza al umbral fijo de -4%.
-        "zscore": ((ultimo - avg) / sd) if (sd and sd > 0) else None,
+        # Cuantas desviaciones estandar sobre/bajo su LINEA DE TENDENCIA
+        # esta hoy (antes era contra el promedio plano -- ver
+        # _extension_regresion). Si la regresion no se pudo calcular, cae
+        # al metodo anterior para no quedarse sin senal.
+        "zscore": z_reg if z_reg is not None else (((ultimo - avg) / sd) if (sd and sd > 0) else None),
+        # Metodo con el que se calculo el zscore de arriba, para que la app
+        # pueda decirlo en vez de que el usuario tenga que adivinarlo.
+        "zscoreMetodo": "regresion" if z_reg is not None else "promedio",
+        # Cuanto sube (o baja) la linea de tendencia por dia, en % -- dice si
+        # el ancla misma va subiendo, no solo donde esta el precio respecto de ella.
+        "pendientePct": pendiente_pct,
+        # Distancia al promedio plano: se conserva porque varias partes de la
+        # app la muestran como referencia legible ("esta 5% bajo su promedio").
+        "zscorePromedio": ((ultimo - avg) / sd) if (sd and sd > 0) else None,
         "volDiaria": vol_diaria,
         "rsi14": _rsi(cierres, 14),
         "sma20": (sum(cierres[-20:]) / 20) if len(cierres) >= 20 else None,
         "sma50": (sum(cierres[-50:]) / 50) if len(cierres) >= 50 else None,
         "ret3m": ret_3m,
         "ret1y": ret_1y,
+        # Mayor salto diario reciente atribuible a un evento puntual, y hace
+        # cuantos dias habiles ocurrio. None si no hubo ninguno destacable.
+        "gapPct": gap_pct,
+        "gapDiasAtras": gap_dias_atras,
         "montoMedioDiario30d": monto_medio,
         "ultimoCierreDiario": ultimo,
         "fechaUltimoCierre": puntos[-1]["date"],
@@ -458,6 +551,68 @@ def get_returns(tickers):
     stats, _, _ = get_stats(tickers)
     return {t: {"ret_3m": s.get("ret3m"), "ret_1y": s.get("ret1y")}
             for t, s in stats.items()}
+
+
+_QUOTE_SUMMARY = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+
+
+def get_proximos_reportes(tickers, suffix=None):
+    """
+    Fecha del PROXIMO reporte de resultados (earnings) por ticker.
+
+    POR QUE IMPORTA
+    ===============
+    Una señal tecnica a 3 dias de un reporte no es accionable: el evento
+    domina cualquier lectura de precio. La app puede decir "puntaje -21" sin
+    avisar que la empresa reporta el lunes, que es justamente el dato que
+    cambia la decision. Con esto, signals.py puede marcarlo.
+
+    POR QUE NO SE USA yfinance
+    ==========================
+    yfinance tiene `Ticker.earnings_dates`, pero arrastra pandas y numpy.
+    Este proyecto lo saco a proposito (ver requirements.txt): hacia lento el
+    arranque en frio de Render, que es el cuello de botella real de la app.
+    El endpoint quoteSummary entrega el mismo dato con `requests` puro,
+    mismo patron que ya usa _chart().
+
+    Devuelve {"TICKER": {"fecha": "YYYY-MM-DD", "epoch": 1234567890}}.
+    Los tickers sin dato simplemente no aparecen -- nunca se inventa una
+    fecha, igual criterio que el resto de este modulo.
+    """
+    suf = SUFFIX if suffix is None else suffix
+
+    def _uno(t):
+        simbolo = t + suf
+        try:
+            resp = requests.get(
+                _QUOTE_SUMMARY.format(symbol=simbolo),
+                params={"modules": "calendarEvents"},
+                headers=_HEADERS,
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return t, None
+            cuerpo = resp.json()
+            resultados = ((cuerpo.get("quoteSummary") or {}).get("result") or [])
+            if not resultados:
+                return t, None
+            fechas = (((resultados[0].get("calendarEvents") or {})
+                       .get("earnings") or {}).get("earningsDate") or [])
+            for f in fechas:
+                epoch = f.get("raw") if isinstance(f, dict) else f
+                if isinstance(epoch, (int, float)) and epoch > time.time():
+                    return t, {
+                        "fecha": datetime.fromtimestamp(epoch, tz=timezone.utc)
+                                         .strftime("%Y-%m-%d"),
+                        "epoch": int(epoch),
+                    }
+            return t, None
+        except Exception as e:
+            print(f"[data_source] {simbolo}: fallo calendarEvents -- "
+                  f"{type(e).__name__}: {e}")
+            return t, None
+
+    return {t: d for t, d in _en_paralelo(_uno, tickers) if d}
 
 
 def get_rango_5y(tickers, suffix=None):
