@@ -43,7 +43,7 @@ Si algun dia consigues la API de la Bolsa de Santiago o de tu corredora,
 basta con reemplazar `get_market_data()` — el resto no cambia.
 """
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import time
 
@@ -647,6 +647,108 @@ def get_rango_5y(tickers, suffix=None):
         rangos[t] = {"min5y": min(cierres), "max5y": max(cierres),
                      "diasDeHistorial5y": len(cierres)}
     return rangos
+
+
+# --------------------------------------------------------------------------
+# Historial del IPSA via Stooq (Yahoo NO sirve para esto)
+# --------------------------------------------------------------------------
+#
+# ^IPSA en Yahoo tiene `regularMarketTime` pegado para la cotizacion en vivo
+# (ver encabezado del archivo) -- pero ademas, confirmado en vivo aparte, su
+# serie HISTORICA esta rota: pidas el periodo que pidas, el chart API
+# devuelve un solo punto viejo en vez de la serie completa. Por eso el IPSA
+# en vivo se saca de Diario Financiero (fuente_df.py) y el historico de
+# aca: Stooq publica una descarga CSV publica y sin API key para ^IPSA.
+#
+# OJO: esto no se pudo probar en el sandbox de desarrollo (Stooq no
+# respondio ni siquiera a un ticker de prueba conocido, como si bloqueara
+# peticiones sin navegador real detras) -- se prueba por primera vez en
+# Render. Si falla ahi tambien, get_ipsa_stooq() devuelve [] y quien lo
+# llama debe mostrar "no disponible", nunca inventar la serie.
+_STOOQ_CSV = "https://stooq.com/q/d/l/?s={symbol}&i=d"
+_STOOQ_SYMBOL_IPSA = "^ipsa"
+
+
+def get_ipsa_stooq():
+    """
+    Serie diaria COMPLETA del IPSA desde Stooq (un solo CSV, todo el
+    historial disponible). No recibe periodo: el que llama recorta con
+    filtrar_puntos_por_periodo(). Un solo request cubre todos los rangos
+    que pida el usuario, en vez de uno por período.
+
+    Devuelve una lista de puntos con el mismo formato que usa el resto del
+    modulo: [{"date": "YYYY-MM-DD", "open", "high", "low", "close",
+    "volume"}, ...] ordenados de mas viejo a mas nuevo. Lista vacia si
+    Stooq no respondio o no trajo datos -- nunca se inventa un precio.
+    """
+    try:
+        resp = requests.get(
+            _STOOQ_CSV.format(symbol=_STOOQ_SYMBOL_IPSA),
+            headers=_HEADERS,
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        texto = resp.text.strip()
+        # Stooq devuelve "No data" (texto plano) o una pagina HTML de error
+        # cuando el simbolo no existe o esta con problemas -- ninguna de
+        # las dos empieza con el encabezado CSV esperado.
+        if not texto or not texto.lower().startswith("date,"):
+            print("[data_source] Stooq no devolvio un CSV valido para ^IPSA "
+                  f"(primeros 80 caracteres: {texto[:80]!r})")
+            return []
+
+        puntos = []
+        for linea in texto.splitlines()[1:]:
+            partes = linea.split(",")
+            if len(partes) < 5:
+                continue
+            fecha = partes[0]
+            try:
+                o, h, l, c = (float(partes[1]), float(partes[2]),
+                              float(partes[3]), float(partes[4]))
+            except ValueError:
+                continue
+            vol = 0
+            if len(partes) > 5 and partes[5].strip().isdigit():
+                vol = int(partes[5])
+            puntos.append({"date": fecha, "open": o, "high": h, "low": l,
+                            "close": c, "volume": vol})
+        return puntos
+    except Exception as e:
+        print(f"[data_source] Stooq (^IPSA): fallo la peticion -- "
+              f"{type(e).__name__}: {e}")
+        return []
+
+
+def filtrar_puntos_por_periodo(puntos, period):
+    """
+    Recorta una serie diaria completa al período pedido por el frontend
+    (mismos códigos que /history: 1d, 5d, 1mo, 3mo, 6mo, ytd, 1y, 5y, 8y,
+    10y). Usa fechas de CALENDARIO, no días hábiles -- suficiente para
+    dibujar un gráfico de comparación, no para calcular retornos exactos
+    (para eso ya existe _estadisticas() sobre la serie de Yahoo).
+    """
+    if not puntos:
+        return []
+    if period == "1d":
+        return puntos[-1:]
+    if period == "5d":
+        return puntos[-5:]
+
+    dias_calendario = {
+        "1mo": 30, "3mo": 90, "6mo": 182, "1y": 365,
+        "5y": 5 * 365, "8y": 8 * 365, "10y": 10 * 365,
+    }
+    hoy = datetime.now(timezone.utc).date()
+    if period == "ytd":
+        corte = hoy.replace(month=1, day=1)
+    elif period in dias_calendario:
+        corte = hoy - timedelta(days=dias_calendario[period])
+    else:
+        return puntos
+
+    corte_iso = corte.isoformat()
+    return [p for p in puntos if p["date"] >= corte_iso]
 
 
 def get_bid_ask(tickers):

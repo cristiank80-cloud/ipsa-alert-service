@@ -47,7 +47,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from data_source import (get_market_data, get_stats, get_price_history,
-                         get_rango_5y, get_proximos_reportes)
+                         get_rango_5y, get_proximos_reportes,
+                         get_ipsa_stooq, filtrar_puntos_por_periodo)
 from main import TICKERS, TICKERS_USA
 import fuente_bolsa
 import fuente_df
@@ -704,6 +705,32 @@ VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"}
 _history_cache = {}
 HISTORY_CACHE_TTL = 1800
 
+# Serie diaria COMPLETA del IPSA (Stooq), cacheada aparte. Un solo CSV trae
+# todo el historial, asi que no tiene sentido pedirlo de nuevo por cada
+# periodo -- se guarda entero y /history lo recorta en memoria con
+# filtrar_puntos_por_periodo(). TTL largo (6h): es un indice diario, no
+# necesita frescura de segundos, y asi se pega menos a Stooq.
+_stooq_ipsa_cache = {"data": None, "ts": 0}
+STOOQ_IPSA_TTL = 6 * 3600
+
+
+def _serie_ipsa_stooq():
+    ahora = time.time()
+    vencido = (ahora - _stooq_ipsa_cache["ts"]) > STOOQ_IPSA_TTL
+    if _stooq_ipsa_cache["data"] is None or vencido:
+        datos = get_ipsa_stooq()
+        if datos:
+            # Solo se pisa el cache si Stooq trajo algo -- si esta vez
+            # fallo pero antes habia datos buenos, se sigue sirviendo lo
+            # ultimo bueno en vez de vaciar el grafico de golpe.
+            _stooq_ipsa_cache["data"] = datos
+            _stooq_ipsa_cache["ts"] = ahora
+        elif _stooq_ipsa_cache["data"] is None:
+            # Nunca hubo un dato bueno: no reintentar en cada request,
+            # eso martillaria Stooq. Se recuerda el intento fallido.
+            _stooq_ipsa_cache["ts"] = ahora
+    return _stooq_ipsa_cache["data"] or []
+
 # Alias para pedir el S&P 500 (referencia del ambiente EE.UU., ver
 # INDEX_SYMBOL_USA) por /history -- mismo patron que "IPSA"/"^IPSA" para el
 # indice chileno. Lo usa el frontend para la comparacion "tu cartera vs. el
@@ -722,6 +749,18 @@ def history():
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     if period not in VALID_PERIODS:
         return jsonify({"error": f"period debe ser uno de {sorted(VALID_PERIODS)}"}), 400
+
+    # El IPSA es aparte: Yahoo tiene rota su serie historica (ver el
+    # comentario largo en data_source.get_ipsa_stooq), asi que para este
+    # simbolo puntual /history sale de Stooq en vez de Yahoo. Si Stooq
+    # tampoco responde, se devuelve la lista vacia y el frontend lo dice
+    # explicitamente -- no se cae al dato roto de Yahoo como respaldo,
+    # porque eso volveria a mostrar el mismo punto stale de siempre.
+    if ticker in ("IPSA", "^IPSA"):
+        completa = _serie_ipsa_stooq()
+        puntos = filtrar_puntos_por_periodo(completa, period)
+        return jsonify({"ticker": "IPSA", "period": period, "points": puntos,
+                        "origen": "stooq" if completa else "no_disponible"})
 
     # Si la serie anual ya esta en cache, se recorta de ahi en vez de
     # volver a pedirsela a Yahoo. Menos peticiones = menos rate limiting.
