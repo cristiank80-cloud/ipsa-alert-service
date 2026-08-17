@@ -899,28 +899,35 @@ def _evaluar_objetivos(quotes_map, mercado):
 
 def _direccion_senal(ev):
     """
-    'compra', 'venta' o None, segun el puntaje de signals.evaluar().
+    'compra', 'venta' o None, segun signals.candidato_fuerte().
 
-    Antes esto era un umbral aparte (-4% fijo, despues z <= -1.5) que solo
-    miraba caidas. Ahora usa el MISMO corte que ya arma candidatos_compra/
-    candidatos_venta en signals.rankear() (|puntaje| >= 20): lo que dispara
-    el correo y el push es exactamente lo que el panel "Analisis del
-    momento" de la app ya te muestra, en vez de una regla aparte que podia
-    quedar desincronizada.
+    Antes esto era un umbral aparte (-4% fijo, despues z <= -1.5), y mas
+    tarde uso el puntaje compuesto (|puntaje| >= 20). Ese segundo umbral
+    quedo DESACTUALIZADO cuando se endurecio el filtro de candidatos_compra/
+    candidatos_venta en signals.rankear() (ver RSI_CANDIDATO_*/Z_CANDIDATO_ABS
+    y candidato_fuerte() en signals.py): con |puntaje| >= 20 el correo y el
+    push seguian disparando para decenas de tickers aunque el panel "Analisis
+    del momento" ya mostrara una lista mucho mas corta -- exactamente la
+    desincronizacion que ese ajuste queria evitar.
+
+    Ahora usa el MISMO gate que arma esas listas: exige RSI extremo Y
+    z-score extremo A LA VEZ (signals.candidato_fuerte()), no el puntaje
+    compuesto solo. Asi lo que dispara el correo y el push es exactamente
+    lo que el panel ya te muestra como candidato fuerte.
 
     Excepcion: si la accion trae la bandera "CAIDA SOSTENIDA", NO se avisa
-    aunque el puntaje cruce el umbral de compra. Esa bandera ya le resta
-    puntaje en signals.evaluar(), pero no siempre alcanza para bajarla de
-    20 -- y avisar "posible compra" de algo que esta cayendo de forma
-    sostenida es justo la senal enganosa que la bandera existe para marcar.
+    aunque cumpla el gate de compra. Esa bandera ya le resta puntaje en
+    signals.evaluar(), pero eso no bloquea el gate por RSI/z-score -- y
+    avisar "posible compra" de algo que esta cayendo de forma sostenida es
+    justo la senal enganosa que la bandera existe para marcar.
     """
     if not ev or ev.get("puntaje") is None:
         return None
     if any(b.startswith("CAIDA SOSTENIDA") for b in ev.get("banderas", [])):
         return None
-    if ev["puntaje"] >= 20:
+    if signals.candidato_fuerte(ev, es_venta=False):
         return "compra"
-    if ev["puntaje"] <= -20:
+    if signals.candidato_fuerte(ev, es_venta=True):
         return "venta"
     return None
 
@@ -1003,7 +1010,7 @@ def run_check():
 
     # ---- Senales tecnicas (signals.py) para EE.UU. -------------------------
     # Mismo criterio que el bucle de Chile de arriba (mismo _direccion_senal,
-    # mismo umbral |puntaje| >= 20), pero sobre TICKERS_USA y con la cache
+    # mismo gate candidato_fuerte()), pero sobre TICKERS_USA y con la cache
     # separada del ambiente 2. A proposito NUNCA se fuerza aca una descarga
     # bloqueante de 107 historiales dentro del ciclo de peticion (ver el
     # bloque "POR QUE LAS ACTUALIZACIONES CORREN EN SEGUNDO PLANO" mas
@@ -1377,7 +1384,7 @@ def diag():
         "push": notify.vapid_diagnostico(),
         "correo_configurado": bool(os.environ.get("RESEND_API_KEY")
                                    and os.environ.get("EMAIL_TO")),
-        "modo_alerta": "compra_venta (signals.py, |puntaje| >= 20 -- mismo corte que candidatos_compra/venta; cubre TICKERS y TICKERS_USA)",
+        "modo_alerta": "compra_venta (signals.candidato_fuerte(): RSI y z-score extremos a la vez -- mismo gate que candidatos_compra/venta; cubre TICKERS y TICKERS_USA)",
         "alertas_pendientes_de_correo": len(_alertas_pendientes),
         "ultima_hora_digesto_enviada": _ultima_hora_digesto_enviada,
         "hora_chile_ahora": datetime.now(TZ_CHILE).isoformat(),

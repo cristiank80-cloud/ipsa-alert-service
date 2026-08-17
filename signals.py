@@ -80,6 +80,30 @@ FR_DIVERGENCIA = float(os.environ.get("FR_DIVERGENCIA", 0.10))  # 10 puntos
 # Historial minimo para que el z-score signifique algo.
 DIAS_MINIMOS = int(os.environ.get("DIAS_MINIMOS_SENAL", 60))
 
+# --------------------------------------------------------------------------
+# Filtro para las listas DESTACADAS (candidatos_compra/candidatos_venta) --
+# separado del puntaje compuesto de arriba.
+#
+# Antes bastaba con puntaje >= 20 / <= -20 (ver rankear()), y el puntaje ya
+# suma hasta 40 puntos solo por el z-score -- con z = ±1.5 sigma, SOLO ESE
+# eje ya cruza el umbral, sin que haga falta RSI extremo ni nada mas. Un
+# dia de mercado movido eso alcanzaba a ~47 de 113 papeles en EE.UU
+# marcados "posible venta" al mismo tiempo: con esa cobertura ya no es una
+# señal, es casi todo el universo.
+#
+# Ahora, para ENTRAR a las listas destacadas, hace falta que AMBAS
+# condiciones se cumplan a la vez (no cualquiera de las dos), medidas sobre
+# los indicadores crudos, no sobre el puntaje compuesto:
+RSI_CANDIDATO_VENTA  = float(os.environ.get("RSI_CANDIDATO_VENTA", 80))
+RSI_CANDIDATO_COMPRA = float(os.environ.get("RSI_CANDIDATO_COMPRA", 20))
+Z_CANDIDATO_ABS       = float(os.environ.get("Z_CANDIDATO_ABS", 2.5))
+
+# Tope duro de cuantos items entran a cada lista, YA aplicado el filtro de
+# arriba -- por si un dia especialmente movido igual deja pasar muchos.
+# "Ver X mas" en el frontend deja de ser un acordeon que revela TODO: ahora
+# revela como maximo esto.
+CANDIDATOS_TOPE = int(os.environ.get("CANDIDATOS_TOPE", 12))
+
 # Cuantos dias habiles despues de un salto grande (ver gapPct/gapDiasAtras en
 # data_source.py) se sigue considerando que lo que movio el precio fue ESE
 # evento y no una tendencia nueva. ~3 semanas de bolsa: suficiente para que
@@ -377,6 +401,20 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP", reporte=None
     }
 
 
+def candidato_fuerte(e, es_venta):
+    """
+    Gate estricto para las listas destacadas -- ver el bloque de umbrales
+    RSI_CANDIDATO_*/Z_CANDIDATO_ABS mas arriba para el porque. Exige RSI
+    extremo Y z-score extremo A LA VEZ, no el puntaje compuesto.
+    """
+    z, rsi = e.get("zscore"), e.get("rsi14")
+    if z is None or rsi is None:
+        return False
+    if es_venta:
+        return z >= Z_CANDIDATO_ABS and rsi >= RSI_CANDIDATO_VENTA
+    return z <= -Z_CANDIDATO_ABS and rsi <= RSI_CANDIDATO_COMPRA
+
+
 def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP",
             reportes=None):
     """
@@ -385,6 +423,9 @@ def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP
     `candidatos_compra` NO es una lista de compras sugeridas. Es la lista de
     acciones que estan mas lejos de su propio promedio hacia abajo, con las
     banderas rojas visibles al lado de cada una para que puedas descartarlas.
+    Solo entran las que pasan `candidato_fuerte()` (RSI Y z-score extremos a
+    la vez), y como maximo CANDIDATOS_TOPE por lista -- ver los comentarios
+    junto a esos umbrales mas arriba.
 
     `moneda`: ver evaluar() -- selecciona el umbral de liquidez correcto.
     """
@@ -401,20 +442,21 @@ def rankear(precios, stats, stats_indice=None, minimo_liquidez=True, moneda="CLP
                    if not minimo_liquidez
                    or (e["montoMedioDiario30d"] or 0) >= liquidez_minima]
 
-    compra = sorted([e for e in ejecutables if e["puntaje"] >= 20],
-                    key=lambda e: -e["puntaje"])
-    venta = sorted([e for e in ejecutables if e["puntaje"] <= -20],
-                   key=lambda e: e["puntaje"])
+    compra = sorted([e for e in ejecutables if candidato_fuerte(e, False)],
+                    key=lambda e: -e["puntaje"])[:CANDIDATOS_TOPE]
+    venta = sorted([e for e in ejecutables if candidato_fuerte(e, True)],
+                   key=lambda e: e["puntaje"])[:CANDIDATOS_TOPE]
 
     return {
         "candidatos_compra": compra,
         "candidatos_venta": venta,
         "evaluadas": len(evaluadas),
         "filtradas_por_liquidez": len(evaluadas) - len(ejecutables),
-        # A diferencia de candidatos_compra/venta (solo |puntaje| >= 20),
-        # esto trae TODAS las acciones evaluadas, incluidas las neutras --
-        # lo usa la tarjeta de lista del frontend para mostrar puntaje/RSI/
-        # tendencia de cada accion, no solo de las que ya cruzaron un umbral.
+        # A diferencia de candidatos_compra/venta (filtro estricto + tope,
+        # ver candidato_fuerte), esto trae TODAS las acciones evaluadas,
+        # incluidas las neutras -- lo usa la tarjeta de lista del frontend
+        # para mostrar puntaje/RSI/tendencia de cada accion, no solo de las
+        # que ya cruzaron el umbral estricto.
         "evaluadas_detalle": evaluadas,
         "descargo": DESCARGO,
     }
