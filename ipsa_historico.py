@@ -17,27 +17,45 @@ un dato por dia habil (mismo formato con el que se subio la primera vez).
 Para refrescarlo, se reemplaza ese archivo por una exportacion mas nueva
 con el mismo formato -- no hace falta tocar el codigo.
 
-COMO SE MANTIENE ACTUALIZADO EL DATO DE HOY
-=============================================
+COMO SE MANTIENE ACTUALIZADO EL DATO DE HOY (en memoria, siempre)
+==================================================================
 El disco de Render es EFIMERO: se borra en cada reinicio y en cada
 despliegue (ver el comentario largo sobre esto en server.py). Por eso
-este modulo NUNCA escribe de vuelta en el CSV -- cualquier cosa que
-agregara ahi se perderia en el proximo redeploy sin avisar, lo que es
-peor que no guardar nada.
+este modulo NUNCA escribe de vuelta en el CSV en tiempo de ejecucion --
+cualquier cosa que agregara ahi en caliente se perderia en el proximo
+redeploy sin avisar, lo que es peor que no guardar nada.
 
 En cambio, la estrategia es mas simple y sobrevive a cualquier reinicio:
 
-  1) ipsa_historico.csv es la base FIJA, tal cual se subio. Congelada en
-     la fecha de su ultimo dato.
+  1) ipsa_historico.csv es la base FIJA, tal cual quedo en el ultimo
+     despliegue.
   2) Cada vez que alguien pide el historico, este modulo le agrega ENCIMA
      el valor de HOY, tomado en vivo de la misma fuente que ya usa el
      banner del IPSA (fuente_df.get_index()) -- ese SI se pide fresco en
      cada llamada, nunca se guarda en disco.
 
-Resultado: el grafico siempre trae el dato de HOY real y actualizado. El
-tramo entre la fecha del CSV y hoy (si el archivo lleva un tiempo sin
-renovarse) queda con un salto -- se cierra solo la proxima vez que se
-suba un CSV mas nuevo, no requiere cambios de codigo.
+Esto garantiza que el grafico de HOY siempre este completo mientras el
+servidor esta corriendo. Pero por si solo no resuelve el relleno de dias
+pasados si la app (o el servidor) estuvo un tiempo sin abrirse.
+
+COMO SE RELLENA EL CSV PERMANENTEMENTE (relleno real, entre despliegues)
+==========================================================================
+El propio repo de GitHub (ipsa-alert-service, el mismo donde vive este
+archivo) tiene un paso agregado en monitor.yml ("guardar-ipsa-historico")
+que, una vez por dia habil, le pide a /ipsa-valor-hoy (ver server.py) el
+valor de HOY y lo agrega como fila nueva a ipsa_historico.csv, con un
+commit automatico usando el GITHUB_TOKEN que GitHub Actions ya entrega
+gratis para escribir en su propio repo -- no hace falta ninguna clave
+nueva.
+
+Con eso, el CSV crece solo un dia a la vez y GitHub queda como la fuente
+de verdad permanente: aunque Render este dormido, se reinicie o pasen
+semanas sin desplegar, ese valor ya quedo guardado para siempre en el
+repo. La proxima vez que se despliegue el backend (a mano o si el
+auto-deploy de Render esta activado), ese dia pasa a ser parte de la
+base FIJA de arriba, sin huecos. El add-on en caliente del punto 2 sigue
+existiendo tal cual, para que el dato de HOY se vea altiro aunque el
+commit de ese dia todavia no se haya hecho o desplegado.
 """
 import csv
 import os

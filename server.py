@@ -1312,6 +1312,33 @@ def resumen_diario():
     return jsonify({"estado": "enviado", "texto": texto})
 
 
+@app.route("/ipsa-valor-hoy", methods=["GET"])
+def ipsa_valor_hoy():
+    """
+    Valor del IPSA de HOY (hora Chile), en JSON simple -- pensado para que
+    lo lea el workflow de GitHub Actions (monitor.yml, job
+    "guardar-ipsa-historico") y agregue una fila nueva a
+    ipsa_historico.csv una vez al dia. Ver la seccion "COMO SE RELLENA EL
+    CSV PERMANENTEMENTE" en ipsa_historico.py para el porque.
+
+    No hace que el workflow tenga que scrapear Diario Financiero de nuevo:
+    reusa fuente_df.get_index(), que ya tiene su propia cache de 20
+    segundos, asi que llamar esto seguido no cuesta nada extra.
+
+    503 si Diario Financiero no respondio -- el workflow debe leerlo como
+    "hoy todavia no hay nada que guardar", no como una falla del servicio.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+
+    index = fuente_df.get_index()
+    if not index or index.get("value") is None:
+        return jsonify({"estado": "sin_dato"}), 503
+
+    hoy = datetime.now(TZ_CHILE).strftime("%Y-%m-%d")
+    return jsonify({"estado": "ok", "fecha": hoy, "valor": round(index["value"], 2)})
+
+
 # --------------------------------------------------------------------------
 # Diagnostico
 # --------------------------------------------------------------------------
