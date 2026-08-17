@@ -439,6 +439,13 @@ def _estadisticas(puntos, dias_promedio=90):
         "rsi14": _rsi(cierres, 14),
         "sma20": (sum(cierres[-20:]) / 20) if len(cierres) >= 20 else None,
         "sma50": (sum(cierres[-50:]) / 50) if len(cierres) >= 50 else None,
+        # Igual que sma20/sma50: media simple sobre cierres diarios reales.
+        # Con el "1y" que ya se pide para todo lo demas (~252 dias habiles)
+        # alcanza para los 200 que necesita, sin pedir una ventana mas larga
+        # a Yahoo. Si el papel tiene menos de 200 dias de historial (IPO
+        # reciente, ida y vuelta, etc.) queda en None -- no se rellena con
+        # un numero a medias.
+        "sma200": (sum(cierres[-200:]) / 200) if len(cierres) >= 200 else None,
         "ret3m": ret_3m,
         "ret1y": ret_1y,
         # Mayor salto diario reciente atribuible a un evento puntual, y hace
