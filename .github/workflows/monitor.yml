@@ -71,3 +71,60 @@ jobs:
           cat respuesta.txt
           echo ""
           if [ "$codigo" -ge 400 ]; then exit 1; fi
+
+  guardar-ipsa-historico:
+    # Mismo horario que resumen-diario (una vez al dia habil, al cierre de
+    # la Bolsa de Santiago) -- no hace falta un cron aparte. El servidor
+    # decide adentro (via /ipsa-valor-hoy) si ya hay dato de hoy; este job
+    # ademas es idempotente por su cuenta (revisa el CSV antes de escribir),
+    # asi que no importa que la ventana llame varias veces cada 10 minutos.
+    if: github.event.schedule == '*/10 19-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Necesario para que el GITHUB_TOKEN automatico de este job pueda hacer
+    # commit y push al propio repo (ipsa-alert-service). Si el repo tiene
+    # "Read and write permissions" activado en Settings -> Actions ->
+    # General -> Workflow permissions, esta linea es redundante pero no
+    # molesta; si NO esta activado, esta linea es la que lo habilita solo
+    # para este job, sin tener que tocar la configuracion general del repo.
+    permissions:
+      contents: write
+    steps:
+      - name: Clonar el repo
+        uses: actions/checkout@v4
+
+      - name: Pedir el valor de IPSA de hoy al backend
+        id: valor
+        run: |
+          resp=$(curl -s "https://ipsa-alert-service.onrender.com/ipsa-valor-hoy?token=${{ secrets.CHECK_SECRET }}")
+          echo "Respuesta: $resp"
+          estado=$(python3 -c "import json,sys; print(json.loads('''$resp''').get('estado',''))" 2>/dev/null || echo "")
+          if [ "$estado" != "ok" ]; then
+            echo "Sin dato valido todavia (estado='$estado'); no se guarda nada esta vuelta."
+            echo "hay_dato=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          fecha=$(python3 -c "import json; print(json.loads('''$resp''')['fecha'])")
+          valor=$(python3 -c "import json; print(json.loads('''$resp''')['valor'])")
+          echo "fecha=$fecha" >> "$GITHUB_OUTPUT"
+          echo "valor=$valor" >> "$GITHUB_OUTPUT"
+          echo "hay_dato=true" >> "$GITHUB_OUTPUT"
+
+      - name: Agregar la fila al CSV si no esta ya
+        if: steps.valor.outputs.hay_dato == 'true'
+        run: |
+          ARCHIVO="backend/ipsa_historico.csv"
+          FECHA="${{ steps.valor.outputs.fecha }}"
+          VALOR="${{ steps.valor.outputs.valor }}"
+          if grep -q "^${FECHA};" "$ARCHIVO"; then
+            echo "Ya hay una fila para $FECHA en el CSV; no se duplica."
+            exit 0
+          fi
+          # Se inserta justo despues del encabezado (linea 1), no al final:
+          # el archivo viene ordenado de mas nuevo a mas viejo (ver
+          # ipsa_historico.py), y hoy siempre es el dato mas nuevo de todos.
+          sed -i "1a ${FECHA};${VALOR}" "$ARCHIVO"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$ARCHIVO"
+          git commit -m "IPSA $FECHA: $VALOR (automatico via monitor.yml)"
+          git push
