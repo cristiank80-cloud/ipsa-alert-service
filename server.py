@@ -56,6 +56,7 @@ import ipsa_historico
 import news
 import notify
 import signals
+import indicador_fuerza_fase
 
 app = Flask(__name__)
 CORS(app)
@@ -109,6 +110,60 @@ _rango5y_cache = {"chile": {"data": None, "ts": 0}, "usa": {"data": None, "ts": 
 # publica calendarEvents para los nemotecnicos de la Bolsa de Santiago.
 REPORTES_CACHE_TTL = 12 * 3600
 _reportes_cache = {"usa": {"data": None, "ts": 0}}
+
+# --------------------------------------------------------------------------
+# Diagnostico Fuerza/Weinstein (ver indicador_fuerza_fase.py) -- serie diaria
+# de 5 años POR TICKER, para poder resamplear a semanal (30+30 semanas de
+# ventana no entran en el "1y" que ya cachea _stats_cache/_stats_cache_usa).
+#
+# A DIFERENCIA de esas caches (que refrescan TODO el universo cada 30 min en
+# segundo plano), esta es PEREZOSA: solo se pide la serie de un ticker la
+# PRIMERA VEZ que alguien abre su diagnostico, y de ahi queda cacheada 24h.
+# Con 131 tickers en total, bajarlos todos igual que /rango5y seria una
+# peticion 5 años mas por ticket sin que nadie la haya pedido -- innecesario
+# si Cristian solo mira el diagnostico de unas pocas acciones a la vez.
+#
+# Mismo patron que ya usa /history (get_price_history dentro del ciclo de
+# peticion, sincrono): UNA peticion a Yahoo por un solo simbolo, no la
+# descarga masiva que causaba el bloqueo de 107 historiales. Ver el
+# comentario largo sobre "POR QUE LAS ACTUALIZACIONES CORREN EN SEGUNDO
+# PLANO" mas arriba -- esto es deliberadamente distinto porque es un solo
+# simbolo, poco frecuente (un usuario abriendo un detalle a la vez).
+DIAGNOSTICO_CACHE_TTL = 24 * 3600
+_serie5y_cache = {}  # ticker -> {"puntos": [...], "ts": epoch}
+
+# Indice de referencia para la fuerza relativa del diagnostico, TAMBIEN de
+# 5 años: para Chile sale de ipsa_historico (CSV local + hoy en vivo, cero
+# peticiones nuevas a Yahoo -- ver ese modulo); para EE.UU. sale de Yahoo
+# (^GSPC, que a diferencia de ^IPSA SI tiene historico sano, ver
+# data_source.py) y se cachea 24h una sola vez para TODO el ambiente, no por
+# ticker -- todas las acciones de EE.UU. comparten el mismo S&P 500.
+_indice5y_cache = {"chile": {"puntos": None, "ts": 0}, "usa": {"puntos": None, "ts": 0}}
+
+
+def _serie5y_ticker(ticker, es_usa):
+    ahora = time.time()
+    c = _serie5y_cache.get(ticker)
+    if c is not None and (ahora - c["ts"]) <= DIAGNOSTICO_CACHE_TTL:
+        return c["puntos"]
+    puntos = get_price_history(ticker, "5y", suffix=("" if es_usa else None))
+    _serie5y_cache[ticker] = {"puntos": puntos, "ts": ahora}
+    return puntos
+
+
+def _indice5y(mercado):
+    ahora = time.time()
+    c = _indice5y_cache[mercado]
+    if c["puntos"] is not None and (ahora - c["ts"]) <= DIAGNOSTICO_CACHE_TTL:
+        return c["puntos"]
+    if mercado == "chile":
+        puntos = ipsa_historico.obtener_serie_combinada()
+    else:
+        puntos = get_price_history("^GSPC", "5y", suffix="")
+    if puntos:
+        _indice5y_cache[mercado] = {"puntos": puntos, "ts": ahora}
+    return puntos
+
 
 # Salud del servicio: lo que permite distinguir "no paso nada" de "esta roto".
 _salud = {
@@ -698,6 +753,56 @@ def signal_uno():
     return jsonify(signals.evaluar(ticker, q["price"],
                                    (st["stats"] or {}).get(ticker), st.get("indice"),
                                    moneda=moneda, reporte=reporte))
+
+
+@app.route("/diagnostico", methods=["GET"])
+def diagnostico():
+    """
+    Fuerza Relativa/Absoluta (diario) + Fases de Weinstein (semanal), ver
+    indicador_fuerza_fase.py. Es el puerto de los dos indicadores .pine que
+    Cristian usa en TradingView (clase de Inversapiens) -- mismo espiritu
+    que /signal, pero con la logica de esos dos scripts en vez del modelo
+    de puntaje compuesto de signals.py. Son dos lecturas DISTINTAS y
+    complementarias, no reemplazan una a la otra.
+
+    Devuelve {"diario": {...}, "semanal": {...}}, cada uno con
+    "disponible": false y un "motivo" si todavia no hay suficiente
+    historial (algo esperado los primeros minutos despues de que alguien
+    abre por primera vez el detalle de un ticker que nunca se habia
+    consultado -- ver _serie5y_ticker() mas arriba).
+    """
+    ticker = request.args.get("ticker", "").upper()
+    es_usa = ticker in TICKERS_USA
+    if ticker not in TICKERS and not es_usa:
+        return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+
+    mercado = "usa" if es_usa else "chile"
+    st = _refrescar_stats_usa() if es_usa else _refrescar_stats()
+
+    # Serie diaria del ticker: preferimos la de 1 año que YA esta en cache
+    # (gratis, la usa medio backend) -- alcanza de sobra para el diagnostico
+    # diario (hacen falta ~190 dias). Si todavia no llego (cache recien
+    # arrancada), se cae a la de 5 años bajo demanda.
+    puntos_diarios = (st.get("series") or {}).get(ticker)
+    if not puntos_diarios:
+        puntos_diarios = _serie5y_ticker(ticker, es_usa)
+
+    # Serie semanal: SIEMPRE hace falta la de 5 años (30+30 semanas de
+    # ventana no entran en 1 año) -- se pide bajo demanda y se cachea 24h.
+    puntos_5y = _serie5y_ticker(ticker, es_usa)
+
+    indice_puntos = _indice5y(mercado)
+
+    diario = indicador_fuerza_fase.evaluar_diario(puntos_diarios or [], indice_puntos)
+    semanal = indicador_fuerza_fase.evaluar_semanal(puntos_5y or [], indice_puntos)
+
+    return jsonify({
+        "ticker": ticker,
+        "mercado": mercado,
+        "diario": diario,
+        "semanal": semanal,
+        "serverTime": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"}
