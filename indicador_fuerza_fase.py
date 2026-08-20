@@ -226,6 +226,55 @@ def evaluar_diario(puntos, puntos_indice=None):
                 "f7": f7, "f8": f8,
                 "score": sum([f1, f2, f3, f4, f5, f6, f7, f8])}
 
+    # ---- Serie completa de "caso" por dia -----------------------------------
+    # Igual calculo que el bloque "HOY" de mas abajo, pero repetido para CADA
+    # dia con suficiente historial -- no solo el ultimo. Esto es lo que deja
+    # pintar el fondo del grafico igual que bgcolor() en el script .pine
+    # (ver /diagnostico y renderHistoryChart() en el frontend), en vez de
+    # solo poder mostrar el diagnostico del dia de hoy.
+    serie_casos = []
+    for i in range(n):
+        ch = _score_en(i)
+        if ch is None:
+            continue
+        ch_prev = _score_en(i - _BARRAS_ESTR_D) if i - _BARRAS_ESTR_D >= 0 else None
+        fc_i = ch_prev is not None and ch["score"] < ch_prev["score"]
+        sc_i, sl_i = sma_corta[i], sma_larga[i]
+        pcorta_i = cierres[i] < sc_i
+        plarga_i = cierres[i] < sl_i
+        mcruz_i = sc_i < sl_i
+        de_i, sobreext_i = None, False
+        if ema_rapid[i]:
+            de_i = (cierres[i] - ema_rapid[i]) / ema_rapid[i] * 100
+            sobreext_i = de_i > _UMBRAL_EXT
+        oport_i = (ch["score"] >= 6 and not mcruz_i and not plarga_i
+                   and not pcorta_i and not sobreext_i)
+        recup_i = False
+        for k in range(max(0, i - _VENTANA_RECUPERANDO + 1), i + 1):
+            if k == 0 or sma_corta[k] is None or sma_corta[k - 1] is None:
+                continue
+            if not (cierres[k] > sma_corta[k] and cierres[k - 1] <= sma_corta[k - 1]):
+                continue
+            chk = _score_en(k)
+            chk_prev = _score_en(k - _BARRAS_ESTR_D) if k - _BARRAS_ESTR_D >= 0 else None
+            cae_k = chk is not None and chk_prev is not None and chk["score"] < chk_prev["score"]
+            if not cae_k:
+                recup_i = True
+                break
+        if plarga_i:
+            caso_i = "DECLIVE"
+        elif pcorta_i and fc_i:
+            caso_i = "DIVERGENCIA"
+        elif sobreext_i:
+            caso_i = "SOBREEXTENDIDA"
+        elif oport_i:
+            caso_i = "OPORTUNIDAD"
+        elif recup_i and not oport_i:
+            caso_i = "RECUPERANDO"
+        else:
+            caso_i = None
+        serie_casos.append({"date": fechas[i], "caso": caso_i})
+
     hoy = n - 1
     checks_hoy = _score_en(hoy)
     if checks_hoy is None:
@@ -247,7 +296,6 @@ def evaluar_diario(puntos, puntos_indice=None):
     if puntos_indice:
         alineado = _alinear_indice_por_fecha(fechas, puntos_indice)
         rs = [(cierres[i] / alineado[i]) if alineado[i] else None for i in range(n)]
-        rs_validos = [v for v in rs if v is not None]
         # Solo se usa si el tramo final esta bien alineado (sin huecos grandes
         # por feriados de un solo mercado) -- exige que las ultimas 63 barras
         # (~3 meses) tengan RS calculable.
@@ -362,6 +410,7 @@ def evaluar_diario(puntos, puntos_indice=None):
         "casoTexto": caso_texto,
         "decision": decision,
         "regla": regla,
+        "serieCasos": serie_casos,
     }
 
 
@@ -561,4 +610,9 @@ def evaluar_semanal(puntos, puntos_indice=None):
                          "a5_distribucion": a5},
         "scoreAgotamiento": score_agotamiento,
         "techoConfirmado": techo_confirmado,
+        # Fase de CADA semana con dato (no solo la de hoy) -- el array
+        # 'fases' ya se calcula completo mas arriba para que la maquina de
+        # estados tenga memoria; se expone tal cual para pintar el fondo del
+        # grafico igual que bgcolor() en el .pine (0 = sin dato, se omite).
+        "serieFases": [{"date": fechas[i], "fase": fases[i]} for i in range(n) if fases[i] != 0],
     }

@@ -777,23 +777,17 @@ def diagnostico():
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
 
     mercado = "usa" if es_usa else "chile"
-    st = _refrescar_stats_usa() if es_usa else _refrescar_stats()
 
-    # Serie diaria del ticker: preferimos la de 1 año que YA esta en cache
-    # (gratis, la usa medio backend) -- alcanza de sobra para el diagnostico
-    # diario (hacen falta ~190 dias). Si todavia no llego (cache recien
-    # arrancada), se cae a la de 5 años bajo demanda.
-    puntos_diarios = (st.get("series") or {}).get(ticker)
-    if not puntos_diarios:
-        puntos_diarios = _serie5y_ticker(ticker, es_usa)
-
-    # Serie semanal: SIEMPRE hace falta la de 5 años (30+30 semanas de
-    # ventana no entran en 1 año) -- se pide bajo demanda y se cachea 24h.
+    # Una sola serie de 5 años para AMBOS calculos (bajo demanda, cache 24h
+    # -- ver _serie5y_ticker mas arriba). El semanal SIEMPRE la necesita (30+
+    # 30 semanas de ventana no entran en 1 año); el diario le alcanzaba con
+    # 1 año, pero usar la misma de 5 aca tambien deja que "serieCasos" cubra
+    # todo lo que el frontend pueda llegar a pedir para pintar el fondo del
+    # grafico (hasta el boton "5A"), sin una segunda fuente de datos.
     puntos_5y = _serie5y_ticker(ticker, es_usa)
-
     indice_puntos = _indice5y(mercado)
 
-    diario = indicador_fuerza_fase.evaluar_diario(puntos_diarios or [], indice_puntos)
+    diario = indicador_fuerza_fase.evaluar_diario(puntos_5y or [], indice_puntos)
     semanal = indicador_fuerza_fase.evaluar_semanal(puntos_5y or [], indice_puntos)
 
     return jsonify({
