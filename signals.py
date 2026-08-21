@@ -484,10 +484,17 @@ GLOSARIO = {
         "LIQUIDEZ BAJA": "Volumen promedio menor que el umbral. Difícil de ejecutar sin mover el precio en contra.",
         "RSI EXTREMO": "RSI fuera de rango normal (< 10 o > 90) — sobrevendido o sobrecomprado severo.",
     },
+    # AGOSTO 2026: se les quito el veredicto ("señal de posible compra/venta").
+    # Este puntaje mide DISTANCIA AL PROMEDIO, no calidad ni oportunidad, y
+    # tiene un punto ciego conocido: una accion en caida libre marca puntaje
+    # alto positivo durante toda la caida sin dejar de hacerlo nunca. Decia
+    # "posible compra" para acciones que el diagnostico de fases marcaba como
+    # fase 4 -- dos partes de la misma app contradiciendose. Ahora describe lo
+    # que mide y deja la decision al embudo (que) y al diagnostico (cuando).
     "puntaje": {
-        "alto_positivo": "Puntaje >= 20: señal de posible compra. El precio está bajo su promedio (z-score bajo) y hay tendencia alcista.",
-        "alto_negativo": "Puntaje <= -20: señal de posible venta. El precio está alto su promedio (z-score alto) y hay tendencia bajista.",
-        "neutral": "Puntaje entre -20 y 20: sin señal clara. Monitorea los cambios en los próximos días.",
+        "alto_positivo": "Puntaje >= 20: el precio está lejos BAJO su promedio (z-score bajo) y la tendencia corta es alcista. Es una medida de distancia, no de oportunidad: revisa la fase antes de concluir nada.",
+        "alto_negativo": "Puntaje <= -20: el precio está lejos SOBRE su promedio (z-score alto) y la tendencia corta es bajista. Distancia, no veredicto.",
+        "neutral": "Puntaje entre -20 y 20: el precio está cerca de su promedio. Nada que destacar por este lado.",
     },
     "criterios": {
         "z_score": "Cuántas desviaciones estándar está el precio hoy respecto de su promedio de 90 días. Z < -1.5 es bajo; Z > 1.5 es alto.",
