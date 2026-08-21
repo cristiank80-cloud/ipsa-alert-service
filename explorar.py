@@ -156,6 +156,12 @@ _WORKERS = 3
 # sabian.
 TOPE_DESCARGA_SEG = int(__import__("os").environ.get("EXPLORAR_TOPE_SEG", 6 * 60))
 
+# Cuantas "dudosas" (las que se cayeron por falta de dato, no por no cumplir)
+# se diagnostican igual. Cada una cuesta una serie de 5 años, asi que no
+# pueden ser todas. Se ordenan alfabeticamente para que el corte sea estable
+# entre corridas y no cambie de nombres al azar.
+TOPE_DUDOSAS = 15
+
 TTL_SERIE = 12 * 3600
 _SERIES_CACHE = {}          # ticker -> {"puntos": [...], "ts": epoch}
 _SERIES_LOCK = threading.Lock()
@@ -344,9 +350,25 @@ def embudo(metricas, umbrales):
 
 
 def embudo_fundamental(vivos, fund, umbrales):
-    """Segunda mitad del embudo: los tres filtros que necesitan Yahoo."""
+    """
+    Segunda mitad del embudo: los tres filtros que necesitan Yahoo.
+
+    LAS QUE NO SE PUEDEN EVALUAR NO SE PIERDEN
+    ===========================================
+    Antes, una accion a la que Yahoo no le entregaba la capitalizacion
+    simplemente desaparecia del analisis. Para un informe eso da lo mismo;
+    para lo que Cristian usa esto -- una PRIMERA ALERTA, una lista corta de
+    "anda a mirar estas en TradingView" -- es lo peor que puede pasar:
+    esconde nombres sin decirlo.
+
+    Ahora esas acciones salen aparte, en `dudosas`, con el detalle de que
+    dato falto. Pasaron todos los filtros que SI se pudieron medir. En
+    TradingView, que es donde Cristian va a mirar igual, ese dato esta a la
+    vista en dos segundos.
+    """
     pasos = []
     sin_dato = {"capB": 0, "crecBpa": 0, "crecVentas": 0}
+    dudosas = {}          # ticker -> [campos que faltaron]
 
     def filtrar(campo, minimo, etiqueta, detalle):
         nonlocal vivos
@@ -355,6 +377,8 @@ def embudo_fundamental(vivos, fund, umbrales):
             v = (fund.get(t) or {}).get(campo)
             if not isinstance(v, (int, float)):
                 sin_dato[campo] += 1
+                dudosas.setdefault(t, {"metricas": m, "faltan": []})
+                dudosas[t]["faltan"].append(campo)
                 continue
             if v >= minimo:
                 nuevos[t] = m
@@ -369,7 +393,12 @@ def embudo_fundamental(vivos, fund, umbrales):
     filtrar("crecVentas", umbrales["crecimiento"], f"Ingresos trim. YoY ≥ {umbrales['crecimiento']:g} %",
             "y vende más")
 
-    return pasos, vivos, sin_dato
+    # Una accion que fallo un filtro REAL (dato presente, no alcanza el
+    # umbral) no es dudosa: no pasa, y punto. Solo quedan las que se cayeron
+    # por falta de dato en algun paso.
+    reales = set(vivos)
+    dudosas = {t: d for t, d in dudosas.items() if t not in reales}
+    return pasos, vivos, sin_dato, dudosas
 
 
 # ---------------------------------------------------------------------------
@@ -490,10 +519,16 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
     # ---- Paso 2b · capitalizacion y crecimiento ---------------------------
     _set(f"Pidiendo fundamentales de {len(vivos)} candidatas…", 60)
     fund = fundamentales(sorted(vivos.keys()))
-    pasos_b, vivos, sin_dato = embudo_fundamental(vivos, fund, umbrales)
+    pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(vivos, fund, umbrales)
     pasos = pasos_a + pasos_b
     tras_embudo = sorted(vivos.keys())
-    _set(f"{len(tras_embudo)} pasaron el embudo. Ahora Weinstein…", 72)
+    # Las dudosas tambien se diagnostican: si ademas resultan estar en fase 2
+    # con fuerza, valen mucho mas la pena que una que paso el embudo pero
+    # esta en fase 4. Se acotan a TOPE_DUDOSAS para no disparar la cuenta de
+    # descargas de 5 años.
+    dudosas_diag = sorted(dudosas.keys())[:TOPE_DUDOSAS]
+    _set(f"{len(tras_embudo)} pasaron el embudo "
+         f"(+{len(dudosas_diag)} sin dato completo). Ahora Weinstein…", 72)
 
     # ---- Pasos 3 y 4 · Weinstein y fuerza ---------------------------------
     idx = indice_5y()
@@ -507,11 +542,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             "semanal": indicador_fuerza_fase.evaluar_semanal(puntos, idx),
         }
 
-    diags = {t: d for t, d in _paralelo(_diag, tras_embudo) if d}
+    diags = {t: d for t, d in _paralelo(_diag, tras_embudo + dudosas_diag) if d}
     _set("Cruzando fase, score y fuerza relativa…", 90)
 
-    candidatas = []
-    for t in tras_embudo:
+    def _tarjeta(t, metricas_t):
         d = diags.get(t) or {}
         sem = d.get("semanal") or {}
         dia = d.get("diario") or {}
@@ -520,24 +554,29 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         # nuevo aca seria duplicar su logica y arriesgarse a que las dos
         # cuentas se separen en el futuro.
         n_conf = sem.get("scoreConfirmaciones") if sem.get("disponible") else None
-        candidatas.append({
+        return {
             "ticker": t,
             "nombre": f.get("nombre") or t,
             "sector": f.get("sector"),
             "industria": f.get("industria"),
-            "precio": round(vivos[t]["precio"], 2),
-            "sma50": round(vivos[t]["sma50"], 2) if vivos[t].get("sma50") else None,
+            "precio": round(metricas_t["precio"], 2),
+            "sma50": round(metricas_t["sma50"], 2) if metricas_t.get("sma50") else None,
             "capB": f.get("capB"),
             "crecBpa": f.get("crecBpa"),
             "crecVentas": f.get("crecVentas"),
-            "volM": vivos[t].get("volM"),
+            "volM": metricas_t.get("volM"),
             "fase": sem.get("fase") if sem.get("disponible") else None,
             "confirmaciones": n_conf,
             "veredictoSemanal": sem.get("veredicto"),
             "score": dia.get("score") if dia.get("disponible") else None,
             "caso": dia.get("caso"),
             "fuerzaRelativa": dia.get("fuerzaRelativa") or dia.get("fuerza_relativa"),
-        })
+            # Para ir directo a mirarla en TradingView, que es donde Cristian
+            # hace el analisis de verdad. Este modulo es la PRIMERA ALERTA.
+            "tradingview": f"https://www.tradingview.com/symbols/{t}/",
+        }
+
+    candidatas = [_tarjeta(t, vivos[t]) for t in tras_embudo]
 
     def _pasa_weinstein(c):
         return c["fase"] == 2 and isinstance(c["confirmaciones"], int) and c["confirmaciones"] >= 4
@@ -587,8 +626,39 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         s = c["sector"] or "(sin sector)"
         por_sector[s] = por_sector.get(s, 0) + 1
 
+    # Las dudosas que ademas resultaron tecnicamente sanas suben a su propia
+    # lista: son las que mas vale la pena mirar en TradingView, porque lo
+    # unico que les falta es un dato que ahi se ve de inmediato.
+    NOMBRE_CAMPO = {"capB": "capitalización", "crecBpa": "crecimiento del BPA",
+                    "crecVentas": "crecimiento de ingresos"}
+    revisar_a_mano = []
+    for t in dudosas_diag:
+        c = _tarjeta(t, dudosas[t]["metricas"])
+        if not (_pasa_weinstein(c) and _pasa_fuerza(c)):
+            continue
+        c["faltan"] = [NOMBRE_CAMPO.get(x, x) for x in dudosas[t]["faltan"]]
+        revisar_a_mano.append(c)
+    revisar_a_mano.sort(key=lambda c: -(c["score"] or 0))
+
+    # LA PRIMERA ALERTA: lo unico que hay que leer si vas apurado.
+    alerta = {
+        "cuantas": len(finalistas),
+        "tickers": [c["ticker"] for c in finalistas],
+        "revisarAMano": len(revisar_a_mano),
+        "sectoresFuertes": [x["nombre"] for x in sectores[:3]],
+        "industriasFuertes": [x["nombre"] for x in industrias[:3]],
+        "cobertura": round(len(metricas) / max(1, len(universo)) * 100),
+        "frase": (
+            f"{len(finalistas)} candidata(s) sobre {len(metricas)} acciones revisadas"
+            + (f", más {len(revisar_a_mano)} para mirar a mano" if revisar_a_mano else "")
+            + f". Los sectores que tiran: {', '.join(x['nombre'] for x in sectores[:3])}."
+        ),
+    }
+
     _set("Listo.", 100)
     return {
+        "alerta": alerta,
+        "revisarAMano": revisar_a_mano,
         "generado": datetime.now(timezone.utc).isoformat(),
         "duracionSeg": int(time.time() - t0),
         "umbrales": umbrales,
@@ -612,6 +682,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         "trasFuerza": [c["ticker"] for c in tras_fuerza],
         "finalistas": finalistas,
         "descartadasPorIndustria": descartadas,
+        "dudosas": {t: [NOMBRE_CAMPO.get(x, x) for x in d["faltan"]]
+                    for t, d in dudosas.items()},
         "reparto": por_sector,
         "notas": ([
             f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
@@ -627,8 +699,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             "La capitalización se evalúa junto al crecimiento y no antes de la "
             "tendencia: los tres salen de la misma consulta, y pedirla para las "
             f"{len(metricas)} costaría cientos de peticiones desperdiciadas.",
-            "Una acción sin dato no pasa el filtro. 'No se sabe' se cuenta aparte "
-            "de 'no cumple', en sinDatoFundamental.",
+            "Una acción sin dato no pasa el filtro, pero TAMPOCO desaparece: sale "
+            "en 'revisarAMano' si además está técnicamente sana, con el detalle de "
+            "qué dato faltó. Para una primera alerta, esconder un nombre es peor "
+            "que mostrarlo con una advertencia.",
         ],
     }
 
