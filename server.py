@@ -74,6 +74,30 @@ SUBSCRIPTIONS_FILE = os.environ.get("SUBSCRIPTIONS_FILE", "push_subscriptions.js
 OBJETIVOS_FILE = os.environ.get("OBJETIVOS_FILE", "alertas_precio.json")
 CHECK_SECRET = os.environ.get("CHECK_SECRET")
 
+# --------------------------------------------------------------------------
+# WATCHLIST PERSONAL -- las candidatas de Explorar que NO estan en la grilla
+# --------------------------------------------------------------------------
+# El problema que resuelve: el modulo Explorar barre 536 acciones, pero la
+# grilla que recibe precio cada ciclo son 172. Cuando Explorar encontraba una
+# candidata fuera de esas 172, no habia forma de vigilarla -- ni precio en la
+# app, ni alerta de "esperando entrada", ni push. La candidata quedaba como
+# un nombre en una lista y nada mas.
+#
+# Ahora el frontend manda su watchlist a POST /watchlist y esos simbolos se
+# suman a la tanda de EE.UU. Sin maquinaria nueva: entran por el mismo
+# get_market_data() y el mismo get_stats() que ya corren, asi que aparecen
+# solos en /quotes-usa Y en _evaluar_objetivos() (o sea, el push funciona
+# igual que para cualquier accion de la grilla).
+#
+# EL TOPE ES LO QUE HACE QUE ESTO SEA SEGURO. Con WATCHLIST_MAX en 15, la
+# tanda de EE.UU. pasa de 172 a 187 simbolos como maximo (+8,7%). Sin tope,
+# el frontend podria mandar las 536 y volveriamos exactamente al problema que
+# la separacion grilla/universo existia para evitar (ver main.py). Ademas
+# solo se aceptan simbolos que esten en UNIVERSO_ANALISIS: no es un campo de
+# texto libre apuntando a Yahoo.
+WATCHLIST_FILE = os.environ.get("WATCHLIST_FILE", "watchlist.json")
+WATCHLIST_MAX = int(os.environ.get("WATCHLIST_MAX", 15))
+
 PRICE_CACHE_TTL = int(os.environ.get("PRICE_CACHE_TTL", 45))
 STATS_CACHE_TTL = int(os.environ.get("STATS_CACHE_TTL", 1800))
 
@@ -318,7 +342,13 @@ def _refrescar_stats_usa(forzar=False):
     ahora = time.time()
     if forzar or _stats_cache_usa["stats"] is None or (ahora - _stats_cache_usa["ts"]) > STATS_CACHE_TTL:
         def _trabajo():
-            stats, indice, series = get_stats(TICKERS_USA, suffix="", con_indice=True,
+            # La watchlist entra aca tambien, no solo en los precios. Sin
+            # esto una accion de watchlist llegaria con precio pero sin avg90
+            # ni sma50, y el detalle de la app se queda en "Cargando datos
+            # reales..." para siempre -- mostraria el nombre sin poder
+            # mostrar nada mas, que es peor que no mostrarlo.
+            stats, indice, series = get_stats(_tickers_usa_con_watchlist(), suffix="",
+                                               con_indice=True,
                                                index_symbol=INDEX_SYMBOL_USA)
             if stats:
                 _stats_cache_usa.update({"stats": stats, "indice": indice,
@@ -333,7 +363,8 @@ def _refrescar_precios_usa(forzar=False):
         def _trabajo():
             # El indice viaja en la MISMA tanda paralela que los ETFs (igual
             # que se hizo para las acciones chilenas) -- no una peticion aparte.
-            quotes, _ = get_market_data(TICKERS_USA + [INDEX_SYMBOL_USA], suffix="")
+            quotes, _ = get_market_data(
+                _tickers_usa_con_watchlist() + [INDEX_SYMBOL_USA], suffix="")
             if quotes:
                 indice = quotes.pop(INDEX_SYMBOL_USA, None)
                 _price_cache_usa.update({"quotes": quotes, "index": indice, "ts": time.time()})
@@ -409,6 +440,54 @@ def _leer_objetivos():
         except Exception as e:
             print(f"[server] Archivo de objetivos de precio ilegible: {e}")
     return {}
+
+
+def _leer_watchlist():
+    """
+    Lista de simbolos extra que se suman a la tanda de EE.UU. Siempre
+    devuelve una lista limpia: solo simbolos del universo de analisis, sin
+    repetidos, sin los que ya estan en la grilla, y como maximo WATCHLIST_MAX.
+
+    Se filtra AL LEER y no solo al escribir a proposito: el archivo vive en
+    el disco efimero de Render y podria quedar de una version anterior con
+    otro tope o con simbolos que desde entonces salieron del universo.
+    """
+    if not os.path.exists(WATCHLIST_FILE):
+        return []
+    try:
+        with open(WATCHLIST_FILE) as f:
+            crudo = json.load(f)
+    except Exception as e:
+        print(f"[server] Archivo de watchlist ilegible: {e}")
+        return []
+    if not isinstance(crudo, list):
+        return []
+    return _limpiar_watchlist(crudo)
+
+
+def _limpiar_watchlist(simbolos):
+    universo = set(UNIVERSO_ANALISIS)
+    en_grilla = set(TICKERS_USA)
+    limpia, vistos = [], set()
+    for s in simbolos:
+        if not isinstance(s, str):
+            continue
+        t = s.strip().upper()
+        # Ya estar en la grilla no es un error del frontend: es el caso
+        # normal cuando una candidata que estaba fuera despues entra. Se
+        # ignora en silencio porque ya recibe precio por el camino de siempre.
+        if not t or t in vistos or t in en_grilla or t not in universo:
+            continue
+        vistos.add(t)
+        limpia.append(t)
+        if len(limpia) >= WATCHLIST_MAX:
+            break
+    return limpia
+
+
+def _tickers_usa_con_watchlist():
+    """La grilla MAS la watchlist. Es lo que se le pide a Yahoo cada ciclo."""
+    return TICKERS_USA + _leer_watchlist()
 
 
 @app.route("/vapid-public-key", methods=["GET"])
@@ -541,6 +620,79 @@ def ver_alertas_precio():
     return jsonify(_leer_objetivos())
 
 
+@app.route("/watchlist", methods=["POST"])
+def guardar_watchlist():
+    """
+    Recibe la watchlist COMPLETA del frontend y reemplaza el archivo -- mismo
+    criterio que /alertas-precio: el telefono es la fuente de verdad, el
+    servidor solo necesita una copia fresca para saber a quien pedirle precio.
+
+    Body: {"tickers": ["VRT", "AXON", ...]}
+
+    La respuesta dice explicitamente que fue ACEPTADO y que fue RECHAZADO,
+    con el motivo. Si el frontend manda 30 simbolos y el tope son 15, tiene
+    que poder decirselo al usuario en vez de que 15 desaparezcan en silencio.
+    """
+    body = request.get_json(silent=True) or {}
+    pedidos = body.get("tickers")
+    if not isinstance(pedidos, list):
+        return jsonify({"status": "error", "message": "falta 'tickers' (lista)"}), 400
+
+    aceptados = _limpiar_watchlist(pedidos)
+    universo, en_grilla = set(UNIVERSO_ANALISIS), set(TICKERS_USA)
+    rechazados = {}
+    for s in pedidos:
+        if not isinstance(s, str):
+            continue
+        t = s.strip().upper()
+        if not t or t in aceptados:
+            continue
+        if t in en_grilla:
+            rechazados[t] = "ya esta en la grilla (ya recibe precio)"
+        elif t not in universo:
+            rechazados[t] = "no esta en el universo de analisis"
+        else:
+            rechazados[t] = f"se paso del tope de {WATCHLIST_MAX}"
+
+    # OJO CON EL forzar=True DE MAS ABAJO. La app manda su watchlist CADA VEZ
+    # que se abre (para repoblar el servidor despues de un despliegue, porque
+    # el disco de Render es efimero). Si cada uno de esos POST forzara un
+    # refresco de estadisticas, abrir la app tres veces seguidas dispararia
+    # tres tandas de ~190 historiales de un año contra Yahoo -- exactamente
+    # el 429 que todo este archivo trata de evitar.
+    #
+    # Por eso se compara con lo que ya habia: si la lista viene igual (el
+    # caso normal, que es "la app se abrio"), no se fuerza nada y el ciclo
+    # sigue su ritmo. Solo se fuerza cuando de verdad cambio.
+    anterior = _leer_watchlist()
+    cambio = anterior != aceptados
+
+    try:
+        with open(WATCHLIST_FILE, "w") as f:
+            json.dump(aceptados, f, indent=2)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    if cambio:
+        # Que el proximo /quotes-usa ya los traiga, sin esperar a que venza
+        # el TTL: si no, el usuario agrega una accion y la ve "sin precio"
+        # hasta 45 segundos despues, que parece que no funciono.
+        _refrescar_precios_usa(forzar=True)
+        _refrescar_stats_usa(forzar=True)
+
+    return jsonify({"status": "ok", "aceptados": aceptados, "cambio": cambio,
+                    "rechazados": rechazados, "tope": WATCHLIST_MAX})
+
+
+@app.route("/watchlist", methods=["GET"])
+def ver_watchlist():
+    """Que simbolos extra esta siguiendo el servidor ahora mismo."""
+    actual = _leer_watchlist()
+    return jsonify({"tickers": actual, "total": len(actual), "tope": WATCHLIST_MAX,
+                    "grilla_usa": len(TICKERS_USA),
+                    "pedidos_por_ciclo": len(TICKERS_USA) + len(actual) + 1})
+
+
 # --------------------------------------------------------------------------
 # Datos para la app
 # --------------------------------------------------------------------------
@@ -631,8 +783,15 @@ def quotes_usa():
     stats = st["stats"] or {}
     quotes_raw = pc["quotes"] or {}
 
+    # La watchlist viaja en la MISMA respuesta que la grilla, no en un
+    # endpoint aparte: para el frontend son acciones con precio igual que
+    # cualquier otra, y ya vienen en la misma tanda. Lo unico que cambia es
+    # que van marcadas, para que la app sepa que NO debe dibujarles tarjeta
+    # en la grilla de EE.UU. -- solo existen para "esperando entrada" y para
+    # que se puedan abrir en el detalle.
+    watch = _leer_watchlist()
     data = {}
-    for t in TICKERS_USA:
+    for t in TICKERS_USA + watch:
         q = quotes_raw.get(t)
         if not q:
             continue
@@ -660,6 +819,7 @@ def quotes_usa():
             "montoMedioDiario30d": s.get("montoMedioDiario30d"),
             "bid": None, "ask": None, "bidSize": None, "askSize": None,
             "puntasDisponibles": False,
+            "esWatchlist": t in watch,
         }
 
     indice = pc.get("index")
@@ -675,7 +835,8 @@ def quotes_usa():
         } if indice else None,
         "indexDisponible": indice is not None,
         "recibidos": len(data),
-        "esperados": len(TICKERS_USA),
+        "esperados": len(TICKERS_USA) + len(watch),
+        "watchlist": watch,
         "cached_at": pc["ts"],
         "cache_ttl_seconds": PRICE_CACHE_TTL,
         "fuente": "yahoo",
@@ -1596,11 +1757,22 @@ def universo_diag():
     """
     muertos = simbolos_en_cuarentena()
     solo_analisis = sorted(set(UNIVERSO_ANALISIS) - set(TICKERS_USA))
+    watch = _leer_watchlist()
     return jsonify({
         "grilla": {
             "chile": len(TICKERS),
             "usa": len(TICKERS_USA),
             "nota": "Lo que la app dibuja como tarjetas y refresca cada ciclo.",
+        },
+        "watchlist": {
+            "tickers": watch,
+            "total": len(watch),
+            "tope": WATCHLIST_MAX,
+            "peticiones_usa_por_ciclo": len(TICKERS_USA) + len(watch) + 1,
+            "nota": "Candidatas de Explorar que NO estan en la grilla. Reciben "
+                    "precio en la misma tanda que la grilla (por eso el push de "
+                    "precio objetivo les funciona igual), pero la app no les "
+                    "dibuja tarjeta. El +1 de las peticiones es el S&P 500.",
         },
         "analisis": {
             "total": len(UNIVERSO_ANALISIS),
