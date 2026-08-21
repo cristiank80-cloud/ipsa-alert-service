@@ -58,6 +58,7 @@ import news
 import notify
 import signals
 import indicador_fuerza_fase
+import explorar
 
 app = Flask(__name__)
 CORS(app)
@@ -1617,6 +1618,113 @@ def universo_diag():
                      "main.py Y en index.html."),
         },
     })
+
+
+# ==========================================================================
+# EXPLORAR -- el metodo completo, a pedido
+# ==========================================================================
+# Ver explorar.py para el pipeline. Aca solo viven los tres endpoints que lo
+# disparan y lo consultan.
+#
+# POR QUE SON TRES Y NO UNO
+# =========================
+# Una corrida tarda entre 3 y 6 minutos (536 historiales + fundamentales).
+# Con UN worker de gunicorn, hacer eso dentro de la peticion dejaria la app
+# entera colgada todo ese rato -- y ademas el celular cortaria por timeout
+# mucho antes. Asi que: /explorar/run arranca y devuelve al tiro,
+# /explorar/estado dice como va, y /explorar/resultado entrega lo ultimo que
+# se calculo.
+
+@app.route("/explorar/run", methods=["POST", "GET"])
+def explorar_run():
+    """
+    Arranca el analisis. Devuelve de inmediato -- NO espera el resultado.
+
+    Si ya hay uno corriendo devuelve 409 en vez de encolar otro: dos
+    corridas simultaneas son ~1.000 peticiones en paralelo a Yahoo y un 429
+    garantizado para todo el servidor, incluido el ciclo normal de precios.
+
+    Parametros opcionales (para mover los umbrales del embudo desde la app):
+      ?precio=10&capB=2&volM=2&crecimiento=25
+    """
+    def _num(nombre):
+        v = request.args.get(nombre)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento")}
+    arranco, motivo = explorar.iniciar(
+        UNIVERSO_ANALISIS, lambda t: _serie5y_ticker(t, True),
+        lambda: _indice5y("usa"), umbrales)
+
+    if not arranco:
+        return jsonify({"arrancado": False, "motivo": motivo,
+                        "estado": explorar.estado()}), 409
+    return jsonify({"arrancado": True, "universo": len(UNIVERSO_ANALISIS),
+                    "estado": explorar.estado()})
+
+
+@app.route("/explorar/estado", methods=["GET"])
+def explorar_estado():
+    """Como va la corrida. Barato: no toca la red, solo lee variables."""
+    return jsonify(explorar.estado())
+
+
+@app.route("/explorar/resultado", methods=["GET"])
+def explorar_resultado():
+    """
+    El ultimo analisis calculado, completo. Queda en memoria 24h.
+
+    Si nunca se corrio devuelve 404 con `hayResultado: false` -- la app
+    muestra "sin datos todavia" y el boton de correr, en vez de un error.
+    Si el servidor se reinicio, el resultado se pierde: es memoria, igual
+    que las suscripciones de push (disco efimero de Render). Correr de nuevo
+    tarda lo mismo que la primera vez.
+    """
+    datos = explorar.resultado()
+    if datos is None:
+        return jsonify({"hayResultado": False, "estado": explorar.estado()}), 404
+    return jsonify({"hayResultado": True, "estado": explorar.estado(), "analisis": datos})
+
+
+@app.route("/diagnostico-lote", methods=["GET"])
+def diagnostico_lote():
+    """
+    /diagnostico para varios tickers de una vez: ?tickers=AAPL,MSFT,NVDA
+
+    Reusa la MISMA cache de 5 años de /diagnostico (_serie5y_cache, 24h), asi
+    que pedir en lote diez acciones que ya se miraron una por una no cuesta
+    ni una peticion nueva a Yahoo.
+
+    Tope de 40 por llamada. No es capricho: cada ticker que NO este en cache
+    son 5 años de historial, y cuarenta de esos ya son varios segundos de
+    worker ocupado. La app pagina si necesita mas.
+    """
+    crudo = request.args.get("tickers", "")
+    pedidos = [t.strip().upper() for t in crudo.split(",") if t.strip()]
+    if not pedidos:
+        return jsonify({"error": "falta ?tickers=A,B,C"}), 400
+    if len(pedidos) > 40:
+        return jsonify({"error": f"maximo 40 por llamada, pediste {len(pedidos)}"}), 400
+
+    conocidos = set(TICKERS) | set(TICKERS_USA) | set(UNIVERSO_ANALISIS)
+    salida, desconocidos = {}, []
+    for t in pedidos:
+        if t not in conocidos:
+            desconocidos.append(t)
+            continue
+        es_usa = t not in TICKERS
+        puntos = _serie5y_ticker(t, es_usa)
+        idx = _indice5y("usa" if es_usa else "chile")
+        salida[t] = {
+            "mercado": "usa" if es_usa else "chile",
+            "diario": indicador_fuerza_fase.evaluar_diario(puntos or [], idx),
+            "semanal": indicador_fuerza_fase.evaluar_semanal(puntos or [], idx),
+        }
+    return jsonify({"diagnosticos": salida, "desconocidos": desconocidos,
+                    "serverTime": datetime.now(timezone.utc).isoformat()})
 
 
 @app.route("/health")
