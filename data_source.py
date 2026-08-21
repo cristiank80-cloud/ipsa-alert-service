@@ -45,6 +45,7 @@ basta con reemplazar `get_market_data()` — el resto no cambia.
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import math
+import threading
 import time
 
 import requests
@@ -69,12 +70,70 @@ _MAX_WORKERS = 8  # mas que esto y Yahoo empieza a devolver 429
 # Capa de red
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Cuarentena de simbolos muertos
+# --------------------------------------------------------------------------
+# El universo de analisis pasó a ser el S&P 500 + Nasdaq-100 (~536 simbolos).
+# En una lista de ese tamaño SIEMPRE hay alguno que se renombro, se fusiono o
+# salio de bolsa, y cada uno de esos cuesta una peticion desperdiciada cada
+# vez que se recorre el universo -- para siempre, porque nada lo saca solo.
+# Ya paso con ITAUCORP y SAAM en la lista chilena, y ahi eran dos sobre 50.
+#
+# Esto lo resuelve sin intervencion: cuando Yahoo responde que el simbolo NO
+# EXISTE (no un 429, no una caida -- "no existe"), el simbolo queda anotado y
+# no se vuelve a pedir mientras el proceso siga vivo.
+#
+# POR QUE EN MEMORIA Y NO EN DISCO
+# =================================
+# El disco de Render es efimero (ver el comentario de push_subscriptions.json
+# en server.py): un archivo aca se borra en cada despliegue igual. Y esta
+# bien que se borre -- si un simbolo vuelve a existir, o si lo comentaste mal,
+# el proximo reinicio le da otra oportunidad. El costo de equivocarse es una
+# pasada fallida, no un simbolo perdido para siempre.
+#
+# Se consulta desde /universo-diag. NO afecta al ciclo de 30 minutos salvo
+# para ahorrarle peticiones.
+_MUERTOS = {}          # simbolo -> motivo
+_MUERTOS_LOCK = threading.Lock()
+
+# Frases con las que Yahoo dice "ese simbolo no existe". Cualquier otro
+# error (429, timeout, 503) NO manda a cuarentena: eso es Yahoo con
+# problemas, no el simbolo. Confundirlos borraria medio universo en un mal
+# dia de la API.
+_NO_EXISTE = ("no data found", "symbol may be delisted", "not found",
+              "no timezone found", "invalid symbol")
+
+
+def simbolos_en_cuarentena():
+    """Copia del registro de simbolos muertos. La usa /universo-diag."""
+    with _MUERTOS_LOCK:
+        return dict(_MUERTOS)
+
+
+def _marcar_muerto(symbol, motivo):
+    with _MUERTOS_LOCK:
+        if symbol not in _MUERTOS:
+            _MUERTOS[symbol] = motivo
+            print(f"[data_source] {symbol}: EN CUARENTENA -- {motivo}. "
+                  f"No se vuelve a pedir hasta que reinicie el servidor. "
+                  f"Van {len(_MUERTOS)} en cuarentena.")
+
+
+def _esta_muerto(symbol):
+    with _MUERTOS_LOCK:
+        return symbol in _MUERTOS
+
+
 def _chart(symbol, params, reintentos=2):
     """
     Una llamada al chart API. Devuelve el dict `result[0]` o None.
     Reintenta con espera creciente ante 429/5xx, que es como Yahoo avisa
     que le estas pidiendo demasiado rapido.
+
+    Si el simbolo ya esta en cuarentena, devuelve None sin salir a la red.
     """
+    if _esta_muerto(symbol):
+        return None
     for intento in range(reintentos + 1):
         try:
             resp = requests.get(
@@ -90,11 +149,20 @@ def _chart(symbol, params, reintentos=2):
                 print(f"[data_source] {symbol}: Yahoo respondio {resp.status_code} "
                       f"(rate limit o caida). Se devuelve vacio, NO se inventa un precio.")
                 return None
+            # 404 es la respuesta de Yahoo a un simbolo que no existe. Es
+            # distinto de un 429: no se reintenta, se manda a cuarentena.
+            if resp.status_code == 404:
+                _marcar_muerto(symbol, "404 de Yahoo (simbolo inexistente)")
+                return None
             resp.raise_for_status()
             cuerpo = resp.json()
             error = (cuerpo.get("chart") or {}).get("error")
             if error:
-                print(f"[data_source] {symbol}: Yahoo reporto error -> {error}")
+                desc = str(error).lower()
+                if any(f in desc for f in _NO_EXISTE):
+                    _marcar_muerto(symbol, str(error)[:160])
+                else:
+                    print(f"[data_source] {symbol}: Yahoo reporto error -> {error}")
                 return None
             resultados = (cuerpo.get("chart") or {}).get("result") or []
             return resultados[0] if resultados else None

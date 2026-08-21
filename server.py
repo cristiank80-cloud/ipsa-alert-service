@@ -48,8 +48,9 @@ from flask_cors import CORS
 
 from data_source import (get_market_data, get_stats, get_price_history,
                          get_rango_5y, get_proximos_reportes,
-                         filtrar_puntos_por_periodo)
-from main import TICKERS, TICKERS_USA
+                         filtrar_puntos_por_periodo,
+                         simbolos_en_cuarentena)
+from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS
 import fuente_bolsa
 import fuente_df
 import ipsa_historico
@@ -1569,6 +1570,53 @@ def email_test():
         return jsonify({"enviado": bool(ok)})
     except Exception as e:
         return jsonify({"enviado": False, "error": str(e)}), 500
+
+
+@app.route("/universo-diag", methods=["GET"])
+def universo_diag():
+    """
+    Estado del universo: cuantos simbolos hay en cada lista y cuales
+    quedaron en cuarentena por no existir en Yahoo.
+
+    POR QUE EXISTE
+    ==============
+    El universo de analisis pasó a ser el S&P 500 + Nasdaq-100 (~536
+    simbolos). En una lista de ese tamaño siempre hay alguno renombrado o
+    salido de bolsa, y antes la unica forma de enterarse era leer los logs
+    de Render linea por linea. Esto lo responde en una peticion.
+
+    `cuarentena` se llena sola: data_source.py anota el simbolo la primera
+    vez que Yahoo responde que no existe, y deja de pedirlo. La lista se
+    vacia en cada reinicio del servidor a proposito -- si un simbolo vuelve
+    a existir, o si se marco por error, el proximo despliegue le da otra
+    oportunidad (ver el comentario de _MUERTOS en data_source.py).
+
+    NO hace ninguna peticion a Yahoo: solo lee lo que ya se sabe.
+    """
+    muertos = simbolos_en_cuarentena()
+    solo_analisis = sorted(set(UNIVERSO_ANALISIS) - set(TICKERS_USA))
+    return jsonify({
+        "grilla": {
+            "chile": len(TICKERS),
+            "usa": len(TICKERS_USA),
+            "nota": "Lo que la app dibuja como tarjetas y refresca cada ciclo.",
+        },
+        "analisis": {
+            "total": len(UNIVERSO_ANALISIS),
+            "solo_en_analisis": len(solo_analisis),
+            "nota": ("Universo del embudo (S&P 500 + Nasdaq-100 + la grilla). "
+                     "Solo se recorre cuando se pide el analisis a mano, "
+                     "NUNCA en el ciclo automatico."),
+        },
+        "cuarentena": {
+            "total": len(muertos),
+            "simbolos": muertos,
+            "nota": ("Simbolos que Yahoo dice que no existen. Se dejan de "
+                     "pedir hasta el proximo reinicio. Si alguno de estos te "
+                     "importa, revisa si cambio de simbolo y corrigelo en "
+                     "main.py Y en index.html."),
+        },
+    })
 
 
 @app.route("/health")

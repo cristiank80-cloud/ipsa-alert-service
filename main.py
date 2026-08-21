@@ -159,3 +159,125 @@ TICKERS_USA = [
 assert len(set(TICKERS_USA)) == len(TICKERS_USA), \
     "TICKERS_USA tiene simbolos repetidos: " + ", ".join(
         sorted({t for t in TICKERS_USA if TICKERS_USA.count(t) > 1}))
+
+# ===========================================================================
+# UNIVERSO DE ANALISIS -- S&P 500 + Nasdaq-100
+# ===========================================================================
+# ESTO NO SE BARRE CADA 30 MINUTOS. Leelo antes de tocarlo.
+#
+# TICKERS_USA (arriba) es la GRILLA: lo que la app dibuja como tarjetas y
+# refresca solo, cada ciclo. Son 172 y ese numero esta calibrado contra el
+# unico worker de Render y contra el limite de 429 de Yahoo.
+#
+# UNIVERSO_ANALISIS (esto) es otra cosa: la lista completa sobre la que
+# corre el EMBUDO del modulo Explorar, y solo cuando Cristian aprieta
+# "Ejecutar analisis" a mano. Son ~560 simbolos. Meterlos en el ciclo
+# automatico tumbaria el servidor -- ya paso una vez, cuando el ambiente de
+# EE.UU. crecio de 7 a 107 instrumentos y get_stats bloqueaba el worker
+# hasta un minuto (ver el comentario largo en server.py). Por eso viven
+# separados: uno es "lo que miro todo el rato", el otro es "lo que reviso
+# cuando me siento a buscar".
+#
+# DE DONDE SALEN
+# ==============
+# Componentes del S&P 500 y del Nasdaq-100 tomados de las listas publicas
+# de Wikipedia (agosto 2026), no escritos de memoria. Las clases de accion
+# van con guion y no con punto, que es como las pide Yahoo: BRK-B, BF-B.
+#
+# "Todo el Nasdaq" son ~3.000 papeles, la mayoria micro caps sin volumen
+# que el embudo descartaria en el primer filtro igual. El Nasdaq-100 es la
+# parte que sirve, y es lo que esta aca.
+#
+# SIMBOLOS QUE PUEDEN NO EXISTIR
+# ===============================
+# En una lista de 500 siempre hay alguno renombrado o recien salido de
+# bolsa. En vez de pedirte que leas logs, data_source.py ahora los pone en
+# CUARENTENA solo: el primero que responde "no existe" queda anotado y no
+# se vuelve a pedir mientras el servidor siga vivo. Se consultan en
+# /universo-diag.
+SP500 = [
+    "A", "AAPL", "ABBV", "ABNB", "ABT", "ACGL", "ACN", "ADBE",
+    "ADI", "ADM", "ADP", "ADSK", "AEE", "AEP", "AES", "AFL",
+    "AIG", "AIZ", "AJG", "AKAM", "ALB", "ALGN", "ALL", "ALLE",
+    "AMAT", "AMCR", "AMD", "AME", "AMGN", "AMP", "AMT", "AMZN",
+    "ANET", "AON", "AOS", "APA", "APD", "APH", "APO", "APP",
+    "APTV", "ARE", "ARES", "ATO", "AVB", "AVGO", "AVY", "AWK",
+    "AXON", "AXP", "AZO", "BA", "BAC", "BALL", "BAX", "BBY",
+    "BDX", "BEN", "BF-B", "BG", "BIIB", "BKNG", "BKR", "BLDR",
+    "BLK", "BMY", "BNY", "BR", "BRK-B", "BRO", "BSX", "BX",
+    "BXP", "C", "CAG", "CAH", "CARR", "CASY", "CAT", "CB",
+    "CBOE", "CBRE", "CCI", "CCL", "CDNS", "CDW", "CEG", "CF",
+    "CFG", "CHD", "CHRW", "CHTR", "CI", "CIEN", "CINF", "CL",
+    "CLX", "CMCSA", "CME", "CMG", "CMI", "CMS", "CNC", "CNP",
+    "COF", "COHR", "COIN", "COO", "COP", "COR", "COST", "CPAY",
+    "CPB", "CPRT", "CPT", "CRH", "CRL", "CRM", "CRWD", "CSCO",
+    "CSGP", "CSX", "CTAS", "CTSH", "CTVA", "CVNA", "CVS", "CVX",
+    "D", "DAL", "DASH", "DD", "DDOG", "DE", "DECK", "DELL",
+    "DG", "DGX", "DHI", "DHR", "DIS", "DLR", "DLTR", "DOC",
+    "DOV", "DOW", "DPZ", "DRI", "DTE", "DUK", "DVA", "DVN",
+    "DXCM", "EA", "EBAY", "ECL", "ED", "EFX", "EG", "EIX",
+    "EL", "ELV", "EME", "EMR", "EOG", "EPAM", "EQIX", "EQR",
+    "EQT", "ERIE", "ES", "ESS", "ETN", "ETR", "EVRG", "EW",
+    "EXC", "EXE", "EXPD", "EXPE", "EXR", "F", "FANG", "FAST",
+    "FCX", "FDS", "FDX", "FE", "FFIV", "FICO", "FIS", "FISV",
+    "FITB", "FIX", "FOX", "FOXA", "FRT", "FSLR", "FTNT", "FTV",
+    "GD", "GDDY", "GE", "GEHC", "GEN", "GEV", "GILD", "GIS",
+    "GL", "GLW", "GM", "GNRC", "GOOG", "GOOGL", "GPC", "GPN",
+    "GRMN", "GS", "GWW", "HAL", "HAS", "HBAN", "HCA", "HD",
+    "HIG", "HII", "HLT", "HON", "HOOD", "HPE", "HPQ", "HRL",
+    "HSIC", "HST", "HSY", "HUBB", "HUM", "HWM", "IBKR", "IBM",
+    "ICE", "IDXX", "IEX", "IFF", "INCY", "INTC", "INTU", "INVH",
+    "IP", "IQV", "IR", "IRM", "ISRG", "IT", "ITW", "IVZ",
+    "J", "JBHT", "JBL", "JCI", "JKHY", "JNJ", "JPM", "KDP",
+    "KEY", "KEYS", "KHC", "KIM", "KKR", "KLAC", "KMB", "KMI",
+    "KO", "KR", "KVUE", "L", "LDOS", "LEN", "LH", "LHX",
+    "LII", "LIN", "LITE", "LLY", "LMT", "LNT", "LOW", "LRCX",
+    "LULU", "LUV", "LVS", "LYB", "LYV", "MA", "MAA", "MAR",
+    "MAS", "MCD", "MCHP", "MCK", "MCO", "MDLZ", "MDT", "MET",
+    "META", "MGM", "MKC", "MLM", "MMM", "MNST", "MO", "MOS",
+    "MPC", "MPWR", "MRK", "MRNA", "MRSH", "MS", "MSCI", "MSFT",
+    "MSI", "MTB", "MTD", "MU", "NCLH", "NDAQ", "NDSN", "NEE",
+    "NEM", "NFLX", "NI", "NKE", "NOC", "NOW", "NRG", "NSC",
+    "NTAP", "NTRS", "NUE", "NVDA", "NVR", "NWS", "NWSA", "NXPI",
+    "O", "ODFL", "OKE", "OMC", "ON", "ORCL", "ORLY", "OTIS",
+    "OXY", "PANW", "PAYX", "PCAR", "PCG", "PEG", "PEP", "PFE",
+    "PFG", "PG", "PGR", "PH", "PHM", "PKG", "PLD", "PLTR",
+    "PM", "PNC", "PNR", "PNW", "PODD", "POOL", "PPG", "PPL",
+    "PRU", "PSA", "PSKY", "PSX", "PTC", "PWR", "PYPL", "Q",
+    "QCOM", "RCL", "REG", "REGN", "RF", "RJF", "RL", "RMD",
+    "ROK", "ROL", "ROP", "ROST", "RSG", "RTX", "RVTY", "SATS",
+    "SBAC", "SBUX", "SCHW", "SHW", "SJM", "SLB", "SMCI", "SNA",
+    "SNDK", "SNPS", "SO", "SOLV", "SPG", "SPGI", "SRE", "STE",
+    "STLD", "STT", "STX", "STZ", "SW", "SWK", "SWKS", "SYF",
+    "SYK", "SYY", "T", "TAP", "TDG", "TDY", "TECH", "TEL",
+    "TER", "TFC", "TGT", "TJX", "TKO", "TMO", "TMUS", "TPL",
+    "TPR", "TRGP", "TRMB", "TROW", "TRV", "TSCO", "TSLA", "TSN",
+    "TT", "TTD", "TTWO", "TXN", "TXT", "TYL", "UAL", "UBER",
+    "UDR", "UHS", "ULTA", "UNH", "UNP", "UPS", "URI", "USB",
+    "V", "VEEV", "VICI", "VLO", "VLTO", "VMC", "VRSK", "VRSN",
+    "VRT", "VRTX", "VST", "VTR", "VTRS", "VZ", "WAB", "WAT",
+    "WBD", "WDAY", "WDC", "WEC", "WELL", "WFC", "WM", "WMB",
+    "WMT", "WRB", "WSM", "WST", "WTW", "WY", "WYNN", "XEL",
+    "XOM", "XYL", "XYZ", "YUM", "ZBH", "ZBRA", "ZTS",
+]
+
+NASDAQ100 = [
+    "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "ALNY",
+    "AMAT", "AMD", "AMGN", "AMZN", "APP", "ARM", "ASML", "AVGO",
+    "AXON", "BKNG", "BKR", "CCEP", "CDNS", "CEG", "CHTR", "CMCSA",
+    "COST", "CPRT", "CRWD", "CSCO", "CSGP", "CSX", "CTAS", "CTSH",
+    "DASH", "DDOG", "DXCM", "EA", "EXC", "FANG", "FAST", "FER",
+    "FTNT", "GEHC", "GILD", "GOOG", "GOOGL", "HON", "IDXX", "INSM",
+    "INTC", "INTU", "ISRG", "KDP", "KHC", "KLAC", "LIN", "LRCX",
+    "MAR", "MCHP", "MDLZ", "MELI", "META", "MNST", "MPWR", "MRVL",
+    "MSFT", "MSTR", "MU", "NFLX", "NVDA", "NXPI", "ODFL", "ORLY",
+    "PANW", "PAYX", "PCAR", "PDD", "PEP", "PLTR", "PYPL", "QCOM",
+    "REGN", "ROP", "ROST", "SBUX", "SHOP", "SNDK", "SNPS", "STX",
+    "TMUS", "TRI", "TSLA", "TTWO", "TXN", "VRSK", "VRTX", "WBD",
+    "WDAY", "WDC", "WMT", "XEL", "ZS",
+]
+
+# El universo real del analisis: los dos indices MAS la grilla (que trae
+# cosas que no estan en ningun indice y Cristian igual quiere mirar --
+# ASML, TSM, NVO, SHOP, MELI, ARM, los ETF y las cinco chicas que pidio).
+UNIVERSO_ANALISIS = sorted(set(SP500) | set(NASDAQ100) | set(TICKERS_USA))
