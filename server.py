@@ -49,7 +49,8 @@ from flask_cors import CORS
 from data_source import (get_market_data, get_stats, get_price_history,
                          get_rango_5y, get_proximos_reportes,
                          filtrar_puntos_por_periodo,
-                         simbolos_en_cuarentena)
+                         simbolos_en_cuarentena,
+                         market_caps, estado_crumb)
 from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS
 import fuente_bolsa
 import fuente_df
@@ -1836,6 +1837,62 @@ def explorar_run():
                         "estado": explorar.estado()}), 409
     return jsonify({"arrancado": True, "universo": len(UNIVERSO_ANALISIS),
                     "estado": explorar.estado()})
+
+
+@app.route("/fundamentales-diag", methods=["GET"])
+def fundamentales_diag():
+    """
+    Por que una accion no trae capitalizacion / crecimiento / sector.
+
+    POR QUE EXISTE
+    ==============
+    La primera corrida real de Explorar devolvio 0 candidatas, y el embudo
+    mostraba: "SMA 50 > SMA 200: 127 -> Capitalizacion >= 2 B: 0". Las 127
+    se cayeron por falta de dato, no por ser chicas. Desde afuera eso es
+    indistinguible de "el mercado no dio nada", y para saber cual de las dos
+    era hubo que leer codigo.
+
+    Esto lo contesta en una peticion: prueba las DOS fuentes para el mismo
+    ticker y devuelve el codigo de respuesta de cada una, mas el estado del
+    crumb (el token de sesion que Yahoo ahora exige para estos endpoints).
+
+        /fundamentales-diag?ticker=NVDA
+
+    SI HACE PETICIONES A LA RED -- es un diagnostico, no un endpoint de la
+    app. No lo llames en bucle.
+    """
+    ticker = (request.args.get("ticker") or "NVDA").strip().upper()
+
+    # OJO: data_source se importa con nombres sueltos (ver el import de
+    # arriba), no como modulo. Escribir `data_source.market_caps(...)` acá
+    # tumba la ruta con NameError -- ya pasó una vez con
+    # simbolos_en_cuarentena en /universo-diag.
+    caps, motivos_lote = market_caps([ticker])
+    _t, datos, motivo_ficha = explorar._fundamentales_uno(ticker)
+
+    return jsonify({
+        "ticker": ticker,
+        "crumb": estado_crumb(),
+        "porLote": {
+            "capB": caps.get(ticker),
+            "motivos": motivos_lote,
+            "funciono": ticker in caps,
+        },
+        "porFicha": {
+            "motivo": motivo_ficha,
+            "funciono": datos is not None,
+            "datos": datos,
+        },
+        "comoLeerlo": {
+            "crumb.tiene=false": "Yahoo no entrego el token de sesion. Ninguna "
+                                 "de las dos fuentes va a funcionar; mira "
+                                 "crumb.motivo.",
+            "HTTP 401 o 403": "El crumb existe pero Yahoo lo rechaza.",
+            "HTTP 429": "Demasiadas peticiones. Espera unos minutos.",
+            "las dos funcionan": "El problema no es de red: es que esa accion "
+                                 "de verdad no publica el dato.",
+        },
+    })
 
 
 @app.route("/explorar/estado", methods=["GET"])

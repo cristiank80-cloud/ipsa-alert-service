@@ -167,16 +167,28 @@ _SERIES_CACHE = {}          # ticker -> {"puntos": [...], "ts": epoch}
 _SERIES_LOCK = threading.Lock()
 
 
-def _serie_1y(ticker):
-    """Serie de 1 año con cache propio de 12h. Ver el comentario de arriba."""
+def _serie_1y(ticker, rango="1y"):
+    """
+    Serie con cache propio de 12h. Ver el comentario de arriba.
+
+    OJO CON EL RANGO. Un "1y" de Yahoo trae ~251 cierres, y la ventana de 12
+    meses necesita 253 (252 dias habiles + el de referencia). Resultado: la
+    fuerza a 12 meses salia None SIEMPRE, y como el orden de sectores se
+    calcula con ese numero, la lista de "sectores que tiran" no estaba
+    ordenada por nada -- era el orden en que estan escritos en ETFS_SECTOR.
+    Se veia perfectamente normal y no significaba nada.
+    Por eso el benchmark y los ETF se piden con rango "2y": son 24 simbolos,
+    cuesta lo mismo, y asi la ventana de 12 meses existe de verdad.
+    """
+    clave = f"{ticker}|{rango}"
     ahora = time.time()
     with _SERIES_LOCK:
-        c = _SERIES_CACHE.get(ticker)
+        c = _SERIES_CACHE.get(clave)
         if c and (ahora - c["ts"]) <= TTL_SERIE:
             return c["puntos"]
-    puntos = data_source.get_price_history(ticker, "1y", suffix="") or []
+    puntos = data_source.get_price_history(ticker, rango, suffix="") or []
     with _SERIES_LOCK:
-        _SERIES_CACHE[ticker] = {"puntos": puntos, "ts": ahora}
+        _SERIES_CACHE[clave] = {"puntos": puntos, "ts": ahora}
     return puntos
 
 
@@ -244,50 +256,89 @@ def _fundamentales_uno(ticker):
     """
     Capitalizacion, crecimiento y sector/industria en UNA peticion.
 
-    Devuelve None si Yahoo no contesta o no trae lo minimo. Nunca inventa:
-    un campo que no viene queda en None y el embudo lo trata como
-    "no se puede evaluar" (que NO es lo mismo que "no pasa" -- ver embudo()).
+    Devuelve (ticker, datos|None, motivo). Nunca inventa: un campo que no
+    viene queda en None y el embudo lo trata como "no se puede evaluar"
+    (que NO es lo mismo que "no pasa" -- ver embudo()).
+
+    El `motivo` viaja hasta el resultado del analisis. Sin el, un embudo que
+    se cae entero en el filtro de capitalizacion es indistinguible de un
+    mercado sin candidatas -- que es exactamente lo que paso la primera vez.
     """
-    try:
-        resp = requests.get(
-            _QS.format(symbol=ticker),
-            params={"modules": _MODULOS},
-            headers=data_source._HEADERS,
-            timeout=data_source._TIMEOUT,
-        )
-        if resp.status_code != 200:
-            return ticker, None
-        res = ((resp.json().get("quoteSummary") or {}).get("result") or [])
-        if not res:
-            return ticker, None
-        r = res[0]
-        price = r.get("price") or {}
-        fin = r.get("financialData") or {}
-        perfil = r.get("assetProfile") or {}
+    r, motivo = data_source.quote_summary(ticker, _MODULOS)
+    if not r:
+        return ticker, None, motivo
 
-        def crudo(d, k):
-            v = (d.get(k) or {})
-            v = v.get("raw") if isinstance(v, dict) else v
-            return v if isinstance(v, (int, float)) else None
+    price = r.get("price") or {}
+    fin = r.get("financialData") or {}
+    perfil = r.get("assetProfile") or {}
 
-        cap = crudo(price, "marketCap")
-        return ticker, {
-            "capB": round(cap / 1e9, 2) if cap else None,
-            "crecBpa": round(crudo(fin, "earningsGrowth") * 100, 1)
-                       if crudo(fin, "earningsGrowth") is not None else None,
-            "crecVentas": round(crudo(fin, "revenueGrowth") * 100, 1)
-                          if crudo(fin, "revenueGrowth") is not None else None,
-            "sector": perfil.get("sector") or None,
-            "industria": perfil.get("industry") or None,
-            "nombre": price.get("longName") or price.get("shortName") or ticker,
-        }
-    except Exception as e:
-        print(f"[explorar] {ticker}: fallo quoteSummary -- {type(e).__name__}: {e}")
-        return ticker, None
+    def crudo(d, k):
+        v = (d.get(k) or {})
+        v = v.get("raw") if isinstance(v, dict) else v
+        return v if isinstance(v, (int, float)) else None
+
+    cap = crudo(price, "marketCap")
+    return ticker, {
+        "capB": round(cap / 1e9, 2) if cap else None,
+        "crecBpa": round(crudo(fin, "earningsGrowth") * 100, 1)
+                   if crudo(fin, "earningsGrowth") is not None else None,
+        "crecVentas": round(crudo(fin, "revenueGrowth") * 100, 1)
+                      if crudo(fin, "revenueGrowth") is not None else None,
+        "sector": perfil.get("sector") or None,
+        "industria": perfil.get("industry") or None,
+        "nombre": price.get("longName") or price.get("shortName") or ticker,
+    }, motivo
 
 
 def fundamentales(tickers):
-    return {t: d for t, d in _paralelo(_fundamentales_uno, tickers) if d}
+    """
+    Devuelve (datos_por_ticker, diagnostico).
+
+    DOS FUENTES PARA LA CAPITALIZACION, A PROPOSITO. La primera corrida real
+    murio entera en el filtro de capitalizacion (127 de 127 sin dato), asi
+    que ese campo ahora se pide por dos caminos independientes:
+
+      1. /v7/finance/quote por LOTES -- 4 peticiones para 127 acciones, y
+         trae exactamente lo que hace falta.
+      2. quoteSummary uno por uno -- ademas del crecimiento y el sector.
+
+    Si el (1) responde y el (2) no, el embudo igual puede filtrar por tamaño
+    en vez de descartarlo todo. El diagnostico dice cual funciono.
+    """
+    caps_lote, motivos_lote = data_source.market_caps(list(tickers))
+
+    datos, motivos_qs = {}, {}
+    for t, d, motivo in _paralelo(_fundamentales_uno, tickers):
+        motivos_qs[motivo] = motivos_qs.get(motivo, 0) + 1
+        if d:
+            datos[t] = d
+
+    # La capitalizacion del lote rellena la que falte. No pisa la de
+    # quoteSummary cuando esta vino: son el mismo dato de la misma fuente,
+    # pero si por lo que sea difieren, la de la ficha completa es la buena.
+    for t, cap in caps_lote.items():
+        if t not in datos:
+            datos[t] = {"capB": cap, "crecBpa": None, "crecVentas": None,
+                        "sector": None, "industria": None, "nombre": t}
+        elif datos[t].get("capB") is None:
+            datos[t]["capB"] = cap
+
+    con_cap = sum(1 for d in datos.values() if isinstance(d.get("capB"), (int, float)))
+    con_crec = sum(1 for d in datos.values() if isinstance(d.get("crecBpa"), (int, float)))
+    diagnostico = {
+        "pedidos": len(tickers),
+        "conCapitalizacion": con_cap,
+        "conCrecimiento": con_crec,
+        "porLote": len(caps_lote),
+        "motivosLote": motivos_lote,
+        "motivosFicha": motivos_qs,
+        "crumb": data_source.estado_crumb(),
+    }
+    if con_cap == 0 and tickers:
+        print(f"[explorar] NINGUNA de las {len(tickers)} trajo capitalizacion. "
+              f"Lote: {motivos_lote} · Ficha: {motivos_qs} · "
+              f"Crumb: {data_source.estado_crumb()}")
+    return datos, diagnostico
 
 
 # ---------------------------------------------------------------------------
@@ -446,17 +497,17 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
 
     # ---- Paso 1 · sectores e industrias -----------------------------------
     _set("Bajando el S&P 500 de referencia…", 3)
-    bench = _cierres(_serie_1y(BENCHMARK))
+    # "2y" y no "1y": con un año justo la ventana de 12 meses nunca alcanzaba
+    # (ver el comentario de _serie_1y). Son 24 simbolos en total, no cambia
+    # el costo de la corrida.
+    bench = _cierres(_serie_1y(BENCHMARK, "2y"))
     if len(bench) < 260:
-        # 252 dias habiles en un año; Yahoo a veces devuelve algunos menos.
-        # Si faltan muchos, la ventana de 12 meses no se puede calcular y se
-        # dice, en vez de mostrar un numero corto disfrazado de anual.
         print(f"[explorar] AVISO: el benchmark trajo {len(bench)} cierres, "
               f"la ventana de 12 meses puede quedar incompleta.")
 
     def _etf(par):
         nombre, sim = par
-        c = _cierres(_serie_1y(sim))
+        c = _cierres(_serie_1y(sim, "2y"))
         if len(c) < 30:
             return None
         fr = _fuerza_vs_benchmark(c, bench)
@@ -482,7 +533,14 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
     # queda sin revisar son acciones nuevas, nunca las que ya se sabian.
     ahora = time.time()
     with _SERIES_LOCK:
-        frescas = {t for t, c in _SERIES_CACHE.items() if (ahora - c["ts"]) <= TTL_SERIE}
+        # Las claves de la cache son "TICKER|rango" desde que el benchmark y
+        # los ETF se piden a 2 años (ver _serie_1y). Acá interesan SOLO las
+        # de 1 año, que son las del universo: sin este filtro, comparar la
+        # clave completa contra un ticker pelado no calzaría nunca y la
+        # cache se veria siempre vacia.
+        frescas = {clave.split("|", 1)[0]
+                   for clave, c in _SERIES_CACHE.items()
+                   if clave.endswith("|1y") and (ahora - c["ts"]) <= TTL_SERIE}
     en_cache = [t for t in universo if t in frescas]
     por_bajar = [t for t in universo if t not in frescas]
     orden = en_cache + por_bajar
@@ -518,7 +576,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
 
     # ---- Paso 2b · capitalizacion y crecimiento ---------------------------
     _set(f"Pidiendo fundamentales de {len(vivos)} candidatas…", 60)
-    fund = fundamentales(sorted(vivos.keys()))
+    fund, diag_fund = fundamentales(sorted(vivos.keys()))
     pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(vivos, fund, umbrales)
     pasos = pasos_a + pasos_b
     tras_embudo = sorted(vivos.keys())
@@ -526,7 +584,19 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
     # con fuerza, valen mucho mas la pena que una que paso el embudo pero
     # esta en fase 4. Se acotan a TOPE_DUDOSAS para no disparar la cuenta de
     # descargas de 5 años.
-    dudosas_diag = sorted(dudosas.keys())[:TOPE_DUDOSAS]
+    #
+    # SE ORDENAN POR VOLUMEN, NO ALFABETICAMENTE. Antes era
+    # `sorted(dudosas.keys())[:15]`, o sea las 15 primeras del abecedario. En
+    # la primera corrida real hubo 127 dudosas y la lista que llego al
+    # usuario fue ABNB, ADP, AMGN, ANET: puras A, mientras NVDA, MU y DELL
+    # -- que estaban en la misma bolsa -- no se diagnosticaron nunca. Con el
+    # volumen medio de 90 dias, que ya esta calculado y no cuesta ninguna
+    # peticion, la lista queda encabezada por las mas liquidas, que es un
+    # criterio defendible en vez de un accidente del abecedario.
+    dudosas_diag = sorted(
+        dudosas.keys(),
+        key=lambda t: -((dudosas[t]["metricas"] or {}).get("volM") or 0),
+    )[:TOPE_DUDOSAS]
     _set(f"{len(tras_embudo)} pasaron el embudo "
          f"(+{len(dudosas_diag)} sin dato completo). Ahora Weinstein…", 72)
 
@@ -676,6 +746,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             "sinDatoFundamental": sin_dato,
             "tickers": tras_embudo,
         },
+        # De donde salieron (o no salieron) capitalizacion y crecimiento.
+        # Esto es lo que convierte "0 candidatas" en una respuesta que se
+        # puede auditar: dice si el mercado no dio nada o si Yahoo no
+        # contesto.
+        "fuentesFundamentales": diag_fund,
         "candidatas": candidatas,
         "caidas": caidas,
         "trasWeinstein": [c["ticker"] for c in tras_weinstein],
@@ -686,6 +761,14 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
                     for t, d in dudosas.items()},
         "reparto": por_sector,
         "notas": ([
+            # Va PRIMERA cuando pasa, porque cambia el significado de todo lo
+            # demas: sin capitalizacion, "0 candidatas" no quiere decir que no
+            # hubiera ninguna, quiere decir que el embudo no pudo terminar.
+            f"ATENCIÓN: ninguna de las {diag_fund['pedidos']} acciones que llegaron "
+            f"al filtro de capitalización trajo ese dato desde Yahoo, así que el "
+            f"embudo se cortó ahí y el resultado NO es comparable con TradingView. "
+            f"No es que no hubiera candidatas: es que no se pudieron evaluar."
+        ] if diag_fund.get("pedidos") and diag_fund.get("conCapitalizacion") == 0 else []) + ([
             f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
             f"del universo ({round(len(metricas)/max(1,len(universo))*100)} %). "
             f"Quedaron {len(saltadas)} sin revisar porque se acabó el presupuesto "

@@ -67,6 +67,199 @@ _MAX_WORKERS = 8  # mas que esto y Yahoo empieza a devolver 429
 
 
 # --------------------------------------------------------------------------
+# AUTENTICACION DE YAHOO (cookie + crumb) -- agosto 2026
+# --------------------------------------------------------------------------
+# EL PROBLEMA QUE ESTO RESUELVE, MEDIDO EN PRODUCCION
+# ====================================================
+# La primera corrida real de Explorar sobre las 536 acciones devolvio esto:
+#
+#     SMA 50 > SMA 200: 127  ->  Capitalizacion >= 2 B: 0
+#     sinDatoFundamental: {"capB": 127}
+#
+# Las 127 que llegaron al filtro de capitalizacion se cayeron ahi, TODAS, por
+# falta de dato. 127 de 127 no es casualidad ni son empresas raras: NVDA, MU,
+# DELL y LLY estaban entre ellas. Era el endpoint el que no contestaba.
+#
+# El chart API (v8/finance/chart) sigue siendo abierto -- por eso los precios
+# funcionan perfecto y el analisis reviso 534 de 536 sin problema. Pero
+# quoteSummary (v10) y quote (v7), que son los que traen capitalizacion,
+# crecimiento y sector, ahora exigen una cookie de sesion MAS un "crumb"
+# (un token corto que Yahoo entrega solo a quien ya tiene la cookie).
+# Sin eso responden 401/403 y este archivo los trataba como "sin dato".
+#
+# COMO SE OBTIENE
+# ===============
+#   1. GET a fc.yahoo.com  ->  Yahoo deja las cookies de sesion.
+#   2. GET a /v1/test/getcrumb con esas cookies  ->  devuelve el crumb en
+#      texto plano.
+#   3. Cada peticion posterior va por la MISMA session y con ?crumb=...
+#
+# El crumb se vence. Por eso `quote_summary()` reintenta UNA vez pidiendo
+# uno nuevo cuando recibe 401/403 -- si no, el servidor quedaria caido para
+# fundamentales hasta el proximo despliegue.
+#
+# SI ESTO FALLA, NO SE INVENTA NADA. `quote_summary()` devuelve
+# (None, motivo) y el motivo viaja hasta /fundamentales-diag, para que la
+# proxima vez no haya que adivinar: se pregunta.
+_QUOTE_SUMMARY = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+_CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+_COOKIE_URL = "https://fc.yahoo.com/"
+_CRUMB_TTL = 3600
+_REFRESCO_MIN = 30   # ver la nota de la estampida en _asegurar_crumb()
+
+_sesion_yf = None
+_crumb = None
+_crumb_ts = 0
+_crumb_motivo = "todavia no se ha pedido"
+_crumb_lock = threading.Lock()
+
+
+def _asegurar_crumb(forzar=False):
+    """Devuelve (session, crumb_o_None). Nunca lanza."""
+    global _sesion_yf, _crumb, _crumb_ts, _crumb_motivo
+    with _crumb_lock:
+        ahora = time.time()
+        if not forzar and _crumb and (ahora - _crumb_ts) < _CRUMB_TTL:
+            return _sesion_yf, _crumb
+
+        # ESTAMPIDA DE RENOVACIONES. `forzar=True` llega desde el reintento
+        # que hace cada peticion cuando recibe 401/403. Si Yahoo esta
+        # rechazando el crumb, lo reciben las 127 a la vez: sin este freno,
+        # 127 renovaciones simultaneas = 254 peticiones extra a Yahoo justo
+        # cuando Yahoo ya nos esta diciendo que no. La primera renueva, las
+        # demas reusan lo que dejo -- que es lo que se queria de todas formas.
+        if forzar and _crumb_ts and (ahora - _crumb_ts) < _REFRESCO_MIN:
+            return _sesion_yf, _crumb
+
+        s = requests.Session()
+        s.headers.update(_HEADERS)
+        try:
+            s.get(_COOKIE_URL, timeout=_TIMEOUT)
+        except Exception as e:
+            # No es fatal: a veces las cookies llegan igual con la peticion
+            # siguiente. Se anota y se sigue.
+            print(f"[data_source] cookie de Yahoo: {type(e).__name__}: {e}")
+
+        crumb = None
+        try:
+            r = s.get(_CRUMB_URL, timeout=_TIMEOUT)
+            texto = (r.text or "").strip()
+            # Un crumb real son ~11 caracteres sin espacios. Si Yahoo
+            # devuelve una pagina de error, viene HTML: hay que descartarlo
+            # explicitamente o lo mandariamos como token en cada peticion.
+            if r.status_code == 200 and texto and len(texto) <= 40 and "<" not in texto:
+                crumb = texto
+                _crumb_motivo = "ok"
+            else:
+                _crumb_motivo = (f"getcrumb respondio {r.status_code} "
+                                 f"({len(texto)} caracteres)")
+        except Exception as e:
+            _crumb_motivo = f"getcrumb fallo: {type(e).__name__}: {e}"
+
+        _sesion_yf, _crumb, _crumb_ts = s, crumb, ahora
+        if crumb is None:
+            print(f"[data_source] SIN CRUMB de Yahoo: {_crumb_motivo}. "
+                  f"Los fundamentales (capitalizacion, crecimiento, sector) "
+                  f"no se van a poder pedir.")
+        return s, crumb
+
+
+def estado_crumb():
+    """Para /fundamentales-diag. No sale a la red."""
+    return {
+        "tiene": _crumb is not None,
+        "motivo": _crumb_motivo,
+        "edadSeg": int(time.time() - _crumb_ts) if _crumb_ts else None,
+        "ttlSeg": _CRUMB_TTL,
+    }
+
+
+def quote_summary(symbol, modules):
+    """
+    quoteSummary autenticado. Devuelve (result[0] o None, motivo).
+
+    El `motivo` es SIEMPRE informativo, incluso cuando sale bien ("200"):
+    es lo que deja diagnosticar sin adivinar por que una accion no trajo
+    capitalizacion.
+    """
+    for intento in (0, 1):
+        s, crumb = _asegurar_crumb(forzar=(intento == 1))
+        params = {"modules": modules}
+        if crumb:
+            params["crumb"] = crumb
+        try:
+            resp = s.get(_QUOTE_SUMMARY.format(symbol=symbol),
+                         params=params, timeout=_TIMEOUT)
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+        if resp.status_code == 200:
+            try:
+                res = ((resp.json().get("quoteSummary") or {}).get("result") or [])
+            except ValueError:
+                return None, "200 pero el cuerpo no es JSON"
+            return (res[0] if res else None), ("200" if res else "200 sin result")
+
+        # 401/403 = crumb vencido o invalido. Vale la pena UN reintento con
+        # crumb nuevo; mas seria martillar a Yahoo con el mismo error.
+        if resp.status_code in (401, 403) and intento == 0:
+            continue
+        return None, f"HTTP {resp.status_code}"
+    return None, "sin crumb utilizable"
+
+
+_QUOTE_V7 = "https://query1.finance.yahoo.com/v7/finance/quote"
+
+
+def market_caps(symbols, tam_lote=40):
+    """
+    Capitalizacion de MUCHOS simbolos por lote. Devuelve (dict, motivos).
+
+    POR QUE EXISTE ADEMAS DE quote_summary()
+    =========================================
+    Este endpoint acepta symbols=A,B,C: 127 acciones son 4 peticiones en vez
+    de 127. Y sobre todo es una SEGUNDA fuente para el unico dato que dejo el
+    embudo en cero. Si quoteSummary falla pero este responde, el analisis
+    igual puede filtrar por capitalizacion en vez de descartarlo todo.
+
+    dict: {"NVDA": 5200.0, ...} en miles de millones de USD.
+    """
+    caps, motivos = {}, []
+    lotes = [symbols[i:i + tam_lote] for i in range(0, len(symbols), tam_lote)]
+    for lote in lotes:
+        conseguido = False
+        for intento in (0, 1):
+            s, crumb = _asegurar_crumb(forzar=(intento == 1))
+            params = {"symbols": ",".join(lote)}
+            if crumb:
+                params["crumb"] = crumb
+            try:
+                resp = s.get(_QUOTE_V7, params=params, timeout=_TIMEOUT)
+            except Exception as e:
+                motivos.append(f"{type(e).__name__}")
+                break
+            if resp.status_code == 200:
+                try:
+                    filas = ((resp.json().get("quoteResponse") or {}).get("result") or [])
+                except ValueError:
+                    motivos.append("200 pero el cuerpo no es JSON")
+                    break
+                for f in filas:
+                    sim, cap = f.get("symbol"), f.get("marketCap")
+                    if sim and isinstance(cap, (int, float)) and cap > 0:
+                        caps[sim] = round(cap / 1e9, 2)
+                conseguido = True
+                break
+            if resp.status_code in (401, 403) and intento == 0:
+                continue
+            motivos.append(f"HTTP {resp.status_code}")
+            break
+        if not conseguido and not motivos:
+            motivos.append("lote sin respuesta")
+    return caps, sorted(set(motivos))
+
+
+# --------------------------------------------------------------------------
 # Capa de red
 # --------------------------------------------------------------------------
 
@@ -628,9 +821,6 @@ def get_returns(tickers):
             for t, s in stats.items()}
 
 
-_QUOTE_SUMMARY = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-
-
 def get_proximos_reportes(tickers, suffix=None):
     """
     Fecha del PROXIMO reporte de resultados (earnings) por ticker.
@@ -659,19 +849,13 @@ def get_proximos_reportes(tickers, suffix=None):
     def _uno(t):
         simbolo = t + suf
         try:
-            resp = requests.get(
-                _QUOTE_SUMMARY.format(symbol=simbolo),
-                params={"modules": "calendarEvents"},
-                headers=_HEADERS,
-                timeout=_TIMEOUT,
-            )
-            if resp.status_code != 200:
+            # Pasa por quote_summary() (cookie + crumb) como todo lo demas:
+            # este endpoint tambien dejo de ser abierto, asi que antes de
+            # esto la fecha del proximo reporte siempre venia vacia.
+            r0, _motivo = quote_summary(simbolo, "calendarEvents")
+            if not r0:
                 return t, None
-            cuerpo = resp.json()
-            resultados = ((cuerpo.get("quoteSummary") or {}).get("result") or [])
-            if not resultados:
-                return t, None
-            fechas = (((resultados[0].get("calendarEvents") or {})
+            fechas = (((r0.get("calendarEvents") or {})
                        .get("earnings") or {}).get("earningsDate") or [])
             for f in fechas:
                 epoch = f.get("raw") if isinstance(f, dict) else f
