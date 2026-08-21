@@ -104,7 +104,80 @@ UMBRALES = {
 }
 
 TTL_RESULTADO = 24 * 3600
-_WORKERS = 4          # ver el comentario de arriba: 4 y no 8, a proposito
+
+# CORRIDA REAL DEL 21-AGO-2026: la primera version tardo mas de 16 minutos
+# solo en la etapa de bajar los 536 historiales, y el progreso se quedaba
+# clavado en 18% todo ese rato. Tres cosas cambiaron por eso:
+#
+#   1. _WORKERS bajo de 4 a 3. En el plan gratuito de Render la instancia
+#      tiene ~0.1 de CPU: cuatro hilos parseando JSON la saturaban tanto que
+#      /health dejaba de responder durante la corrida -- justo lo que este
+#      modulo existia para evitar. Menos hilos terminan ANTES en esta
+#      maquina, porque no se pelean la CPU entre ellos ni con gunicorn.
+#   2. Las series de 1 año ahora se cachean (_SERIES_CACHE). Antes cada
+#      corrida volvia a bajar los 536 desde cero, aunque hubieras corrido el
+#      analisis media hora antes. La segunda corrida del dia ahora es casi
+#      instantanea.
+#   3. El progreso avanza de a poco DENTRO de la etapa larga, en vez de
+#      quedarse en un numero fijo. Un 18% que no se mueve en 16 minutos es
+#      indistinguible de un cuelgue.
+_WORKERS = 3
+
+# ===========================================================================
+# EL HALLAZGO DE LA PRIMERA CORRIDA REAL (21-ago-2026)
+# ===========================================================================
+# Se corrio el analisis completo contra Yahoo por primera vez. A los 25
+# minutos seguia en la etapa de descarga, con la cuarentena vacia (o sea:
+# ningun simbolo malo, solo lentitud). El diagnostico es claro:
+#
+#   **Yahoo estrangula las peticiones cuando le llegan cientos seguidas
+#   desde la misma IP.** Con 429 y timeouts, cada ticker pasa a costar
+#   decenas de segundos en vez de uno, y 536 no terminan nunca.
+#
+# No es un bug del codigo: es el limite real de bajar 536 historiales desde
+# una IP compartida de Render sin API key. Insistir con mas hilos empeora
+# las cosas -- mas 429, no menos datos.
+#
+# LA SOLUCION: EL ANALISIS SE CALIENTA SOLO, DE A POCO
+# =====================================================
+# En vez de exigir que UNA corrida baje las 536, cada corrida:
+#
+#   1. usa GRATIS todo lo que ya tenga en cache (12 h de vigencia),
+#   2. gasta su presupuesto de tiempo bajando SOLO las que faltan,
+#   3. y dice con total claridad sobre cuantas alcanzo a decidir.
+#
+# Asi la primera corrida cubre unas 150-250 acciones, la segunda arranca con
+# esas ya listas y suma otras tantas, y a la tercera el universo esta
+# completo. Un analisis honesto sobre 200 acciones sirve; uno que nunca
+# termina, no.
+#
+# Por eso las que YA estan en cache se procesan PRIMERO: si el presupuesto
+# se acaba, lo que se pierde son acciones nuevas, nunca las que ya se
+# sabian.
+TOPE_DESCARGA_SEG = int(__import__("os").environ.get("EXPLORAR_TOPE_SEG", 6 * 60))
+
+TTL_SERIE = 12 * 3600
+_SERIES_CACHE = {}          # ticker -> {"puntos": [...], "ts": epoch}
+_SERIES_LOCK = threading.Lock()
+
+
+def _serie_1y(ticker):
+    """Serie de 1 año con cache propio de 12h. Ver el comentario de arriba."""
+    ahora = time.time()
+    with _SERIES_LOCK:
+        c = _SERIES_CACHE.get(ticker)
+        if c and (ahora - c["ts"]) <= TTL_SERIE:
+            return c["puntos"]
+    puntos = data_source.get_price_history(ticker, "1y", suffix="") or []
+    with _SERIES_LOCK:
+        _SERIES_CACHE[ticker] = {"puntos": puntos, "ts": ahora}
+    return puntos
+
+
+def series_en_cache():
+    ahora = time.time()
+    with _SERIES_LOCK:
+        return sum(1 for c in _SERIES_CACHE.values() if (ahora - c["ts"]) <= TTL_SERIE)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +417,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
 
     # ---- Paso 1 · sectores e industrias -----------------------------------
     _set("Bajando el S&P 500 de referencia…", 3)
-    bench = _cierres(data_source.get_price_history(BENCHMARK, "1y", suffix="") or [])
+    bench = _cierres(_serie_1y(BENCHMARK))
     if len(bench) < 260:
         # 252 dias habiles en un año; Yahoo a veces devuelve algunos menos.
         # Si faltan muchos, la ventana de 12 meses no se puede calcular y se
@@ -354,7 +427,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
 
     def _etf(par):
         nombre, sim = par
-        c = _cierres(data_source.get_price_history(sim, "1y", suffix="") or [])
+        c = _cierres(_serie_1y(sim))
         if len(c) < 30:
             return None
         fr = _fuerza_vs_benchmark(c, bench)
@@ -373,10 +446,44 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         grupo.sort(key=lambda x: (x["fuerza"].get("m12") is None, -(x["fuerza"].get("m12") or 0)))
 
     # ---- Paso 2a · filtros que salen de la serie de precios ---------------
-    _set(f"Bajando {len(universo)} historiales de un año… (esto es lo que más demora)", 18)
+    # La etapa larga. Se reporta de a cuantas van, y se corta si se pasa del
+    # presupuesto de tiempo -- ver TOPE_DESCARGA_SEG.
+    # Primero las que ya estan en cache (gratis), despues las que faltan.
+    # Ver el comentario de TOPE_DESCARGA_SEG: si se acaba el tiempo, lo que
+    # queda sin revisar son acciones nuevas, nunca las que ya se sabian.
+    ahora = time.time()
+    with _SERIES_LOCK:
+        frescas = {t for t, c in _SERIES_CACHE.items() if (ahora - c["ts"]) <= TTL_SERIE}
+    en_cache = [t for t in universo if t in frescas]
+    por_bajar = [t for t in universo if t not in frescas]
+    orden = en_cache + por_bajar
+
+    _set(f"{len(en_cache)} ya en caché · bajando hasta "
+         f"{TOPE_DESCARGA_SEG // 60} min de las {len(por_bajar)} que faltan…", 18)
+    t_desc = time.time()
+    hechos, saltadas = [0], []
+    lock_cnt = threading.Lock()
+
     def _serie_uno(t):
-        return t, _metricas_de_serie(data_source.get_price_history(t, "1y", suffix="") or [])
-    metricas = {t: m for t, m in _paralelo(_serie_uno, universo) if m}
+        # Las que estan en cache nunca se saltan: no cuestan red.
+        if t not in frescas and (time.time() - t_desc) > TOPE_DESCARGA_SEG:
+            saltadas.append(t)
+            return t, None
+        m = _metricas_de_serie(_serie_1y(t))
+        with lock_cnt:
+            hechos[0] += 1
+            n = hechos[0]
+        if n % 20 == 0 or n == len(orden):
+            pct = 18 + int(34 * n / max(1, len(orden)))   # 18 -> 52
+            _set(f"Historiales: {n} de {len(orden)} · "
+                 f"{int(time.time() - t_desc)}s", pct)
+        return t, m
+
+    metricas = {t: m for t, m in _paralelo(_serie_uno, orden) if m}
+    if saltadas:
+        print(f"[explorar] Presupuesto de tiempo agotado: {len(saltadas)} "
+              f"sin revisar de {len(universo)}. Vuelve a correr el analisis y "
+              f"seguira desde donde quedo -- lo bajado queda en cache 12h.")
     _set(f"{len(metricas)} con historial suficiente. Aplicando filtros de precio y tendencia…", 55)
     pasos_a, vivos = embudo(metricas, umbrales)
 
@@ -490,6 +597,12 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         "embudo": {
             "pasos": pasos,
             "conHistorial": len(metricas),
+            "universoTotal": len(universo),
+            "revisadas": len(metricas),
+            "sinRevisarPorTiempo": len(saltadas),
+            "seCortoPorTiempo": bool(saltadas),
+            "cobertura": round(len(metricas) / max(1, len(universo)) * 100, 1),
+            "veniaEnCache": len(en_cache),
             "sinDatoFundamental": sin_dato,
             "tickers": tras_embudo,
         },
@@ -500,7 +613,14 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         "finalistas": finalistas,
         "descartadasPorIndustria": descartadas,
         "reparto": por_sector,
-        "notas": [
+        "notas": ([
+            f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
+            f"del universo ({round(len(metricas)/max(1,len(universo))*100)} %). "
+            f"Quedaron {len(saltadas)} sin revisar porque se acabó el presupuesto "
+            f"de tiempo: Yahoo estrangula las peticiones cuando le llegan cientos "
+            f"seguidas. Vuelve a correrlo y sigue desde donde quedó — lo ya bajado "
+            f"queda en caché 12 h."
+        ] if saltadas else []) + [
             "El crecimiento de BPA e ingresos es TRIMESTRAL contra el mismo trimestre "
             "del año anterior (lo que entrega Yahoo), no TTM como en TradingView. "
             "Los números no calzan exactamente; el filtro sí cumple su función.",
