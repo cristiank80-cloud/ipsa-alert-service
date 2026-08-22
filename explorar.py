@@ -283,18 +283,30 @@ _MODULOS = "price,financialData,assetProfile"
 # numero negativo da un "crecimiento" con el signo dado vuelta. En esos casos
 # devuelve None y el analisis cae al trimestral, DICIENDOLO en el campo
 # `crecFuente`. Cada accion lleva escrito con que metodo se midio.
+#
+# CAMBIO (post-diagnostico real): sumar 8 trimestres nosotros mismos no
+# funciona -- Yahoo solo expone ~5 trimestres de `quarterlyDilutedEPS` /
+# `quarterlyTotalRevenue` por este endpoint (confirmado con NVDA en
+# produccion: "5 trimestres utiles" en ambos campos, siempre, no un caso
+# aislado). En vez de sumar nosotros, se pide el TTM YA CALCULADO por Yahoo
+# (`trailingDilutedEPS` / `trailingTotalRevenue`): un valor por trimestre
+# reportado, donde cada valor YA es la suma de los 4 trimestres previos a esa
+# fecha. Con eso, comparar el TTM actual contra el de hace 4 trimestres
+# necesita solo 5 puntos (el de ahora + 4 hacia atras), no 8 -- y 5 es
+# justo lo que Yahoo entrega.
 _TIMESERIES = ("https://query2.finance.yahoo.com/ws/fundamentals-timeseries/"
                "v1/finance/timeseries/{symbol}")
-_TIPOS_TTM = "quarterlyDilutedEPS,quarterlyTotalRevenue"
+_TIPOS_TTM = "trailingDilutedEPS,trailingTotalRevenue"
 
 
 def _suma_ttm(valores):
-    """(ttm_actual, ttm_anterior) desde una lista ordenada de mas viejo a mas
-    nuevo. None si no hay ocho trimestres."""
+    """(ttm_actual, ttm_anterior) desde una lista de TTM trailing ordenada de
+    mas viejo a mas nuevo (cada valor ya es una suma de 4 trimestres, hecha
+    por Yahoo). None si no hay al menos 5 puntos (el actual + 4 atras)."""
     limpios = [v for v in valores if isinstance(v, (int, float))]
-    if len(limpios) < 8:
+    if len(limpios) < 5:
         return None, None
-    return sum(limpios[-4:]), sum(limpios[-8:-4])
+    return limpios[-1], limpios[-5]
 
 
 def _crecimiento_ttm_uno(ticker, con_motivo=False):
@@ -306,10 +318,17 @@ def _crecimiento_ttm_uno(ticker, con_motivo=False):
     EL MOTIVO NO ES ADORNO. La primera corrida con TTM devolvio
     conCrecimientoTTM = 0 sobre 104 acciones, y desde afuera era imposible
     saber si Yahoo respondia mal, si el nombre del campo estaba equivocado o
-    si de verdad ninguna tenia ocho trimestres. Ahora lo dice.
+    si de verdad ninguna tenia suficiente historia. El diagnostico real
+    (NVDA, en produccion) mostro la causa: `quarterlyDilutedEPS` /
+    `quarterlyTotalRevenue` solo traen ~5 trimestres por este endpoint, nunca
+    los 8 que la version anterior necesitaba para sumar el TTM a mano. La
+    solucion no es pedir mas historia (Yahoo no la tiene) sino pedirle a
+    Yahoo el TTM ya sumado (`trailing...`), que con esos mismos 5 puntos
+    alcanza.
     """
     ahora = int(time.time())
-    # 3 años hacia atras: ocho trimestres con holgura para reportes tardios.
+    # 3 años hacia atras: sobra margen para los 5 puntos trailing que hacen
+    # falta (actual + 4 trimestres atras), con holgura para reportes tardios.
     desde = ahora - int(3.2 * 365 * 24 * 3600)
     motivo = "?"
     try:
@@ -334,7 +353,7 @@ def _crecimiento_ttm_uno(ticker, con_motivo=False):
 
     series = {}
     for b in bloques:
-        for clave in ("quarterlyDilutedEPS", "quarterlyTotalRevenue"):
+        for clave in ("trailingDilutedEPS", "trailingTotalRevenue"):
             filas = b.get(clave)
             if not filas:
                 continue
@@ -348,13 +367,13 @@ def _crecimiento_ttm_uno(ticker, con_motivo=False):
             series[clave] = valores
 
     out, detalle = {}, {}
-    for clave, destino in (("quarterlyDilutedEPS", "crecBpa"),
-                           ("quarterlyTotalRevenue", "crecVentas")):
+    for clave, destino in (("trailingDilutedEPS", "crecBpa"),
+                           ("trailingTotalRevenue", "crecVentas")):
         vals = series.get(clave)
         utiles = [v for v in (vals or []) if isinstance(v, (int, float))]
         actual, anterior = _suma_ttm(vals or [])
         if actual is None or anterior is None:
-            detalle[clave] = (f"{len(utiles)} trimestres útiles"
+            detalle[clave] = (f"{len(utiles)} puntos TTM útiles"
                               if vals is not None else "el campo no vino")
             continue
         # anterior <= 0: el porcentaje sale con el signo dado vuelta y seria
