@@ -801,7 +801,8 @@ def get_price_history(ticker, period="3mo", suffix=None):
     """
     suf = SUFFIX if suffix is None else suffix
     mapa = {"1d": "1d", "5d": "5d", "1mo": "1mo", "3mo": "3mo",
-            "6mo": "6mo", "ytd": "ytd", "1y": "1y", "5y": "5y", "10y": "10y"}
+            "6mo": "6mo", "ytd": "ytd", "1y": "1y", "2y": "2y",
+            "5y": "5y", "10y": "10y"}
     rango = mapa.get(period, "3mo")
     simbolo = INDEX_SYMBOL if ticker.upper() in ("IPSA", "^IPSA") else ticker + suf
 
