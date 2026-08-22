@@ -1918,6 +1918,33 @@ def explorar_resultado():
     return jsonify({"hayResultado": True, "estado": explorar.estado(), "analisis": datos})
 
 
+@app.route("/explorar/resumen", methods=["GET"])
+def explorar_resumen():
+    """
+    Lo mismo que /explorar/resultado pero SIN el array `acciones`.
+
+    POR QUE EXISTE
+    ==============
+    `acciones` trae las ~534 filas con las metricas crudas de cada accion.
+    Eso es lo que le permite a la app rehacer el embudo al instante cuando
+    mueves un umbral, y tiene que estar. Pero pesa unos 100 KB, y deja
+    /explorar/resultado inservible para mirarlo a ojo en el navegador: el
+    resumen queda enterrado bajo cientos de filas.
+
+    Esto devuelve solo la parte que se lee: la alerta, el embudo paso a paso,
+    las finalistas, las de revisar a mano y de donde salieron los datos.
+    """
+    datos = explorar.resultado()
+    if datos is None:
+        return jsonify({"hayResultado": False, "estado": explorar.estado()}), 404
+    liviano = {k: v for k, v in datos.items() if k != "acciones"}
+    liviano["accionesRevisadas"] = len(datos.get("acciones") or [])
+    liviano["nota"] = ("Resumen sin el detalle por accion. El analisis completo, "
+                       "con las metricas de cada una, esta en /explorar/resultado.")
+    return jsonify({"hayResultado": True, "estado": explorar.estado(),
+                    "analisis": liviano})
+
+
 @app.route("/diagnostico-lote", methods=["GET"])
 def diagnostico_lote():
     """
