@@ -103,7 +103,11 @@ _MAX_WORKERS = 8  # mas que esto y Yahoo empieza a devolver 429
 # proxima vez no haya que adivinar: se pregunta.
 _QUOTE_SUMMARY = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
 _CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
-_COOKIE_URL = "https://fc.yahoo.com/"
+# Dos fuentes de cookies, se prueban en orden. fc.yahoo.com es la que usa
+# todo el mundo y responde 404 dejando las cookies igual; si esa falla (o si
+# desde la IP de Render la redirigen al muro de consentimiento europeo), se
+# prueba la portada de finanzas, que tambien las deja.
+_COOKIE_URLS = ["https://fc.yahoo.com/", "https://finance.yahoo.com/"]
 _CRUMB_TTL = 3600
 _REFRESCO_MIN = 30   # ver la nota de la estampida en _asegurar_crumb()
 
@@ -112,6 +116,52 @@ _crumb = None
 _crumb_ts = 0
 _crumb_motivo = "todavia no se ha pedido"
 _crumb_lock = threading.Lock()
+
+
+def _pedir_crumb(s):
+    """
+    Intenta obtener el crumb con una session ya creada.
+    Devuelve (crumb_o_None, motivo).
+
+    EL 406 QUE COSTO UNA CORRIDA
+    =============================
+    La primera version de esto mandaba las cabeceras de _HEADERS tal cual, y
+    ahi va "Accept: application/json". Pero /v1/test/getcrumb NO devuelve
+    JSON: devuelve el token en TEXTO PLANO. Yahoo respondia 406 Not
+    Acceptable -- "no puedo darte lo que pides en ese formato" -- y sin crumb
+    todo lo demas caia con 401.
+    Se vio en /fundamentales-diag: "getcrumb respondio 406". Por eso estas
+    dos peticiones van con Accept: */* y no con las cabeceras por defecto.
+    """
+    cab = dict(_HEADERS)
+    cab["Accept"] = "*/*"
+    motivo = "ninguna fuente de cookies respondio"
+    for cookie_url in _COOKIE_URLS:
+        try:
+            # Esta peticion existe SOLO para que Yahoo deje sus cookies de
+            # sesion. Que responda 404 es normal y no importa: lo que
+            # interesa viaja en las cabeceras Set-Cookie.
+            s.get(cookie_url, headers=cab, timeout=_TIMEOUT)
+        except Exception as e:
+            print(f"[data_source] cookie de Yahoo ({cookie_url}): "
+                  f"{type(e).__name__}: {e}")
+            continue
+        try:
+            r = s.get(_CRUMB_URL, headers=cab, timeout=_TIMEOUT)
+        except Exception as e:
+            return None, f"getcrumb fallo: {type(e).__name__}: {e}"
+        texto = (r.text or "").strip()
+        # Un crumb real son ~11 caracteres sin espacios. Si Yahoo devuelve
+        # una pagina de error viene HTML: hay que descartarlo explicitamente
+        # o lo mandariamos como token en cada peticion.
+        if r.status_code == 200 and texto and len(texto) <= 40 and "<" not in texto:
+            return texto, "ok"
+        motivo = (f"getcrumb respondio {r.status_code} con {cookie_url}: "
+                  f"{texto[:120].replace(chr(10), ' ')}")
+        if r.status_code != 200:
+            continue   # probar la siguiente fuente de cookies
+        return None, motivo
+    return None, motivo
 
 
 def _asegurar_crumb(forzar=False):
@@ -133,28 +183,7 @@ def _asegurar_crumb(forzar=False):
 
         s = requests.Session()
         s.headers.update(_HEADERS)
-        try:
-            s.get(_COOKIE_URL, timeout=_TIMEOUT)
-        except Exception as e:
-            # No es fatal: a veces las cookies llegan igual con la peticion
-            # siguiente. Se anota y se sigue.
-            print(f"[data_source] cookie de Yahoo: {type(e).__name__}: {e}")
-
-        crumb = None
-        try:
-            r = s.get(_CRUMB_URL, timeout=_TIMEOUT)
-            texto = (r.text or "").strip()
-            # Un crumb real son ~11 caracteres sin espacios. Si Yahoo
-            # devuelve una pagina de error, viene HTML: hay que descartarlo
-            # explicitamente o lo mandariamos como token en cada peticion.
-            if r.status_code == 200 and texto and len(texto) <= 40 and "<" not in texto:
-                crumb = texto
-                _crumb_motivo = "ok"
-            else:
-                _crumb_motivo = (f"getcrumb respondio {r.status_code} "
-                                 f"({len(texto)} caracteres)")
-        except Exception as e:
-            _crumb_motivo = f"getcrumb fallo: {type(e).__name__}: {e}"
+        crumb, _crumb_motivo = _pedir_crumb(s)
 
         _sesion_yf, _crumb, _crumb_ts = s, crumb, ahora
         if crumb is None:
