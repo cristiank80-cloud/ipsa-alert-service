@@ -277,7 +277,33 @@ NASDAQ100 = [
     "WDAY", "WDC", "WMT", "XEL", "ZS",
 ]
 
+# ---------------------------------------------------------------------------
+# LOS ETF NO ENTRAN AL EMBUDO
+# ---------------------------------------------------------------------------
+# Visto en la corrida real del 22 de agosto: en la lista "para revisar a
+# mano" aparecieron VOO, VXUS y SCHD. No es un error de datos -- es que un
+# ETF NO TIENE capitalizacion bursatil ni crecimiento de utilidades en el
+# sentido de una empresa, asi que el embudo los marca como "sin dato" y los
+# manda a revisar. Pero revisarlos no lleva a ninguna parte: no hay nada que
+# revisar. Son fondos indexados, no candidatas de un metodo de seleccion de
+# ACCIONES.
+#
+# Siguen en TICKERS_USA (la grilla): Cristian los tiene y quiere ver su
+# precio todos los dias. Lo que no tiene sentido es evaluarlos con los siete
+# filtros del metodo.
+ETFS_NO_ANALIZAR = [
+    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND",   # nucleo de la cartera
+    "ITA",                                                # sectorial de defensa
+    "WT",                                                 # WisdomTree es la GESTORA (accion), no un ETF: se deja
+]
+# WT se saca de la lista de exclusion: es WisdomTree Inc., la empresa que
+# administra los ETF, y cotiza como accion normal. Estaba puesta arriba solo
+# para dejar escrito por que NO se excluye.
+ETFS_NO_ANALIZAR = [t for t in ETFS_NO_ANALIZAR if t != "WT"]
+
 # El universo real del analisis: los dos indices MAS la grilla (que trae
 # cosas que no estan en ningun indice y Cristian igual quiere mirar --
-# ASML, TSM, NVO, SHOP, MELI, ARM, los ETF y las cinco chicas que pidio).
-UNIVERSO_ANALISIS = sorted(set(SP500) | set(NASDAQ100) | set(TICKERS_USA))
+# ASML, TSM, NVO, SHOP, MELI, ARM y las cinco chicas que pidio), MENOS los
+# ETF, por lo que dice el comentario de arriba.
+UNIVERSO_ANALISIS = sorted(
+    (set(SP500) | set(NASDAQ100) | set(TICKERS_USA)) - set(ETFS_NO_ANALIZAR))

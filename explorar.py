@@ -297,14 +297,21 @@ def _suma_ttm(valores):
     return sum(limpios[-4:]), sum(limpios[-8:-4])
 
 
-def _crecimiento_ttm_uno(ticker):
+def _crecimiento_ttm_uno(ticker, con_motivo=False):
     """
     Devuelve {"crecBpa":…, "crecVentas":…} en % TTM YoY, o {} si no se pudo.
-    Nunca lanza.
+    Con `con_motivo=True` devuelve (datos, motivo) -- lo usa
+    /fundamentales-diag.
+
+    EL MOTIVO NO ES ADORNO. La primera corrida con TTM devolvio
+    conCrecimientoTTM = 0 sobre 104 acciones, y desde afuera era imposible
+    saber si Yahoo respondia mal, si el nombre del campo estaba equivocado o
+    si de verdad ninguna tenia ocho trimestres. Ahora lo dice.
     """
     ahora = int(time.time())
     # 3 años hacia atras: ocho trimestres con holgura para reportes tardios.
     desde = ahora - int(3.2 * 365 * 24 * 3600)
+    motivo = "?"
     try:
         s, crumb = data_source._asegurar_crumb()
         params = {"symbol": ticker, "type": _TIPOS_TTM,
@@ -314,10 +321,16 @@ def _crecimiento_ttm_uno(ticker):
         resp = s.get(_TIMESERIES.format(symbol=ticker), params=params,
                      timeout=data_source._TIMEOUT)
         if resp.status_code != 200:
-            return {}
-        bloques = ((resp.json().get("timeseries") or {}).get("result") or [])
-    except Exception:
-        return {}
+            motivo = f"HTTP {resp.status_code}: {(resp.text or '')[:120]}"
+            return ({}, motivo) if con_motivo else {}
+        cuerpo = resp.json()
+        bloques = ((cuerpo.get("timeseries") or {}).get("result") or [])
+        if not bloques:
+            motivo = f"200 sin result. Claves del cuerpo: {sorted(cuerpo.keys())[:6]}"
+            return ({}, motivo) if con_motivo else {}
+    except Exception as e:
+        motivo = f"{type(e).__name__}: {e}"
+        return ({}, motivo) if con_motivo else {}
 
     series = {}
     for b in bloques:
@@ -334,23 +347,48 @@ def _crecimiento_ttm_uno(ticker):
                 valores.append(v if isinstance(v, (int, float)) else None)
             series[clave] = valores
 
-    out = {}
+    out, detalle = {}, {}
     for clave, destino in (("quarterlyDilutedEPS", "crecBpa"),
                            ("quarterlyTotalRevenue", "crecVentas")):
-        actual, anterior = _suma_ttm(series.get(clave) or [])
+        vals = series.get(clave)
+        utiles = [v for v in (vals or []) if isinstance(v, (int, float))]
+        actual, anterior = _suma_ttm(vals or [])
+        if actual is None or anterior is None:
+            detalle[clave] = (f"{len(utiles)} trimestres útiles"
+                              if vals is not None else "el campo no vino")
+            continue
         # anterior <= 0: el porcentaje sale con el signo dado vuelta y seria
         # peor que no tener el dato.
-        if actual is None or anterior is None or anterior <= 0:
+        if anterior <= 0:
+            detalle[clave] = f"base de comparación {round(anterior,2)} (≤ 0)"
             continue
         out[destino] = round((actual / anterior - 1) * 100, 1)
-    return out
+        detalle[clave] = "ok"
+
+    motivo = "ok" if out else ("sin datos utilizables · " +
+                               " · ".join(f"{k}: {v}" for k, v in detalle.items()))
+    return (out, motivo) if con_motivo else out
 
 
 def crecimiento_ttm(tickers):
-    """{ticker: {"crecBpa":…, "crecVentas":…}} para los que se pudo."""
+    """
+    ({ticker: {"crecBpa":…, "crecVentas":…}}, {motivo: cuantas}).
+
+    El segundo valor es el recuento de por que fallaron las que fallaron.
+    Sin eso, "0 de 104 en TTM" no dice nada accionable.
+    """
     def _uno(t):
-        return t, _crecimiento_ttm_uno(t)
-    return {t: d for t, d in _paralelo(_uno, tickers) if d}
+        d, m = _crecimiento_ttm_uno(t, con_motivo=True)
+        return t, d, m
+    datos, motivos = {}, {}
+    for t, d, m in _paralelo(_uno, tickers):
+        # Los motivos se agrupan por su parte estable: si vienen 104 mensajes
+        # distintos por el numero de trimestres, se pierde la señal.
+        clave = m.split(" · ")[0] if m else "?"
+        motivos[clave] = motivos.get(clave, 0) + 1
+        if d:
+            datos[t] = d
+    return datos, motivos
 
 
 def _fundamentales_uno(ticker):
@@ -432,7 +470,7 @@ def fundamentales(tickers):
     # dice con cual se midio.
     for t, d in datos.items():
         d["crecFuente"] = "trimestral" if isinstance(d.get("crecBpa"), (int, float)) else None
-    ttm = crecimiento_ttm(sorted(datos.keys()))
+    ttm, motivos_ttm = crecimiento_ttm(sorted(datos.keys()))
     for t, v in ttm.items():
         if t not in datos:
             continue
@@ -452,6 +490,7 @@ def fundamentales(tickers):
         "conCrecimiento": con_crec,
         "conCrecimientoTTM": con_ttm,
         "conCrecimientoTrimestral": con_crec - con_ttm,
+        "motivosTTM": motivos_ttm,
         "porLote": len(caps_lote),
         "motivosLote": motivos_lote,
         "motivosFicha": motivos_qs,

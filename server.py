@@ -1869,10 +1869,20 @@ def fundamentales_diag():
     # simbolos_en_cuarentena en /universo-diag.
     caps, motivos_lote = market_caps([ticker])
     _t, datos, motivo_ficha = explorar._fundamentales_uno(ticker)
+    # El crecimiento TTM es la tercera fuente y tiene su propio endpoint en
+    # Yahoo, asi que puede fallar por su cuenta -- de hecho es lo que paso en
+    # la corrida del 22/08: capitalizacion y ficha funcionaban y el TTM daba
+    # 0 de 104, sin ninguna pista de por que.
+    ttm, motivo_ttm = explorar._crecimiento_ttm_uno(ticker, con_motivo=True)
 
     return jsonify({
         "ticker": ticker,
         "crumb": estado_crumb(),
+        "porTTM": {
+            "datos": ttm,
+            "funciono": bool(ttm),
+            "motivo": motivo_ttm,
+        },
         "porLote": {
             "capB": caps.get(ticker),
             "motivos": motivos_lote,
