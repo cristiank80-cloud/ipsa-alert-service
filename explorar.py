@@ -161,6 +161,11 @@ TOPE_DESCARGA_SEG = int(__import__("os").environ.get("EXPLORAR_TOPE_SEG", 6 * 60
 # pueden ser todas. Se ordenan alfabeticamente para que el corte sea estable
 # entre corridas y no cambie de nombres al azar.
 TOPE_DUDOSAS = 15
+# Cuantas acciones reciben fase de Weinstein + score. Cada una cuesta una
+# serie de 5 años, asi que esto es lo que decide si la corrida dura 4 o 12
+# minutos. 60 alcanza para que los filtros de la app se puedan mover con
+# sentido; mas que eso es pagar mucho por acciones que casi nunca se miran.
+TOPE_DIAG = int(__import__("os").environ.get("EXPLORAR_TOPE_DIAG", 60))
 
 TTL_SERIE = 12 * 3600
 _SERIES_CACHE = {}          # ticker -> {"puntos": [...], "ts": epoch}
@@ -251,6 +256,102 @@ def _fuerza_vs_benchmark(cierres, cierres_bench):
 _QS = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
 _MODULOS = "price,financialData,assetProfile"
 
+# ---------------------------------------------------------------------------
+# CRECIMIENTO TTM -- el que usa TradingView
+# ---------------------------------------------------------------------------
+# EL PROBLEMA
+# ===========
+# `financialData.earningsGrowth` de Yahoo es el ULTIMO TRIMESTRE contra el
+# mismo trimestre del año anterior. TradingView filtra por "Crecimiento BPA
+# dil., TTM YoY": los ULTIMOS DOCE MESES contra los doce anteriores. Son dos
+# numeros distintos de la misma empresa, y con umbral de 25% dan listas
+# distintas -- un trimestre bueno aislado pasa el filtro trimestral y no el
+# TTM, y al reves.
+#
+# Hasta ahora esto se documentaba como "aproximacion conocida". Se puede
+# hacer bien: el endpoint fundamentals-timeseries entrega la serie trimestral
+# completa, y con ocho trimestres el TTM YoY sale de una resta.
+#
+#     TTM actual   = suma de los trimestres 1-4 (los mas recientes)
+#     TTM anterior = suma de los trimestres 5-8
+#     crecimiento  = TTM actual / TTM anterior - 1
+#
+# CUANDO NO SE PUEDE, NO SE INVENTA
+# ==================================
+# Si faltan trimestres, o si el TTM anterior es cero o negativo (una empresa
+# que venia perdiendo plata), el porcentaje no significa nada: dividir por un
+# numero negativo da un "crecimiento" con el signo dado vuelta. En esos casos
+# devuelve None y el analisis cae al trimestral, DICIENDOLO en el campo
+# `crecFuente`. Cada accion lleva escrito con que metodo se midio.
+_TIMESERIES = ("https://query2.finance.yahoo.com/ws/fundamentals-timeseries/"
+               "v1/finance/timeseries/{symbol}")
+_TIPOS_TTM = "quarterlyDilutedEPS,quarterlyTotalRevenue"
+
+
+def _suma_ttm(valores):
+    """(ttm_actual, ttm_anterior) desde una lista ordenada de mas viejo a mas
+    nuevo. None si no hay ocho trimestres."""
+    limpios = [v for v in valores if isinstance(v, (int, float))]
+    if len(limpios) < 8:
+        return None, None
+    return sum(limpios[-4:]), sum(limpios[-8:-4])
+
+
+def _crecimiento_ttm_uno(ticker):
+    """
+    Devuelve {"crecBpa":…, "crecVentas":…} en % TTM YoY, o {} si no se pudo.
+    Nunca lanza.
+    """
+    ahora = int(time.time())
+    # 3 años hacia atras: ocho trimestres con holgura para reportes tardios.
+    desde = ahora - int(3.2 * 365 * 24 * 3600)
+    try:
+        s, crumb = data_source._asegurar_crumb()
+        params = {"symbol": ticker, "type": _TIPOS_TTM,
+                  "period1": desde, "period2": ahora, "merge": "false"}
+        if crumb:
+            params["crumb"] = crumb
+        resp = s.get(_TIMESERIES.format(symbol=ticker), params=params,
+                     timeout=data_source._TIMEOUT)
+        if resp.status_code != 200:
+            return {}
+        bloques = ((resp.json().get("timeseries") or {}).get("result") or [])
+    except Exception:
+        return {}
+
+    series = {}
+    for b in bloques:
+        for clave in ("quarterlyDilutedEPS", "quarterlyTotalRevenue"):
+            filas = b.get(clave)
+            if not filas:
+                continue
+            valores = []
+            for f in filas:
+                if not isinstance(f, dict):
+                    continue
+                v = (f.get("reportedValue") or {})
+                v = v.get("raw") if isinstance(v, dict) else v
+                valores.append(v if isinstance(v, (int, float)) else None)
+            series[clave] = valores
+
+    out = {}
+    for clave, destino in (("quarterlyDilutedEPS", "crecBpa"),
+                           ("quarterlyTotalRevenue", "crecVentas")):
+        actual, anterior = _suma_ttm(series.get(clave) or [])
+        # anterior <= 0: el porcentaje sale con el signo dado vuelta y seria
+        # peor que no tener el dato.
+        if actual is None or anterior is None or anterior <= 0:
+            continue
+        out[destino] = round((actual / anterior - 1) * 100, 1)
+    return out
+
+
+def crecimiento_ttm(tickers):
+    """{ticker: {"crecBpa":…, "crecVentas":…}} para los que se pudo."""
+    def _uno(t):
+        return t, _crecimiento_ttm_uno(t)
+    return {t: d for t, d in _paralelo(_uno, tickers) if d}
+
 
 def _fundamentales_uno(ticker):
     """
@@ -323,12 +424,34 @@ def fundamentales(tickers):
         elif datos[t].get("capB") is None:
             datos[t]["capB"] = cap
 
+    # ---- Crecimiento TTM, que es el que usa TradingView -------------------
+    # Se pide DESPUES y solo para las que ya tienen ficha: es una peticion mas
+    # por accion y no vale la pena gastarla en una que ni siquiera trajo
+    # capitalizacion. Lo que devuelve PISA al trimestral, porque es el numero
+    # correcto -- pero el trimestral se queda como respaldo y cada accion
+    # dice con cual se midio.
+    for t, d in datos.items():
+        d["crecFuente"] = "trimestral" if isinstance(d.get("crecBpa"), (int, float)) else None
+    ttm = crecimiento_ttm(sorted(datos.keys()))
+    for t, v in ttm.items():
+        if t not in datos:
+            continue
+        if "crecBpa" in v:
+            datos[t]["crecBpa"] = v["crecBpa"]
+        if "crecVentas" in v:
+            datos[t]["crecVentas"] = v["crecVentas"]
+        if v:
+            datos[t]["crecFuente"] = "ttm"
+
     con_cap = sum(1 for d in datos.values() if isinstance(d.get("capB"), (int, float)))
     con_crec = sum(1 for d in datos.values() if isinstance(d.get("crecBpa"), (int, float)))
+    con_ttm = sum(1 for d in datos.values() if d.get("crecFuente") == "ttm")
     diagnostico = {
         "pedidos": len(tickers),
         "conCapitalizacion": con_cap,
         "conCrecimiento": con_crec,
+        "conCrecimientoTTM": con_ttm,
+        "conCrecimientoTrimestral": con_crec - con_ttm,
         "porLote": len(caps_lote),
         "motivosLote": motivos_lote,
         "motivosFicha": motivos_qs,
@@ -575,7 +698,19 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
     pasos_a, vivos = embudo(metricas, umbrales)
 
     # ---- Paso 2b · capitalizacion y crecimiento ---------------------------
+    # OJO: los fundamentales se piden SOLO para las que pasaron precio,
+    # volumen y tendencia. Eso es lo que hace barata la corrida (unas 130
+    # peticiones en vez de 534) y es tambien el motivo de que en la app los
+    # umbrales de precio/volumen/tendencia se puedan mover libremente pero
+    # los de capitalizacion y crecimiento solo dentro de este subconjunto:
+    # aflojar un filtro de tendencia deja entrar acciones para las que nunca
+    # se pidio la capitalizacion. La app lo dice en vez de mentir con un
+    # numero incompleto.
     _set(f"Pidiendo fundamentales de {len(vivos)} candidatas…", 60)
+    # Se guarda ANTES de que el embudo fundamental lo reduzca: es el conjunto
+    # sobre el que la app puede mover los umbrales de capitalizacion y
+    # crecimiento sin volver a correr nada.
+    vivos_tendencia = dict(vivos)
     fund, diag_fund = fundamentales(sorted(vivos.keys()))
     pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(vivos, fund, umbrales)
     pasos = pasos_a + pasos_b
@@ -612,7 +747,29 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             "semanal": indicador_fuerza_fase.evaluar_semanal(puntos, idx),
         }
 
-    diags = {t: d for t, d in _paralelo(_diag, tras_embudo + dudosas_diag) if d}
+    # A QUIENES SE LES CALCULA FASE Y FUERZA
+    # =======================================
+    # Antes: solo a las que pasaban el embudo COMPLETO. Eso hacia imposible
+    # apagar los filtros de Weinstein/fuerza desde la app para comparar
+    # contra TradingView, y tambien impedia aflojar el umbral de crecimiento
+    # sin volver a correr todo: las que entraban al aflojarlo no tenian fase.
+    #
+    # Ahora se diagnostica a TODAS las que pasaron precio/volumen/tendencia
+    # (`vivos_tendencia`), hasta TOPE_DIAG, ordenadas por volumen. Cada
+    # diagnostico cuesta una serie de 5 años, asi que el tope es real y la
+    # app dice cuantas quedaron sin diagnosticar en vez de esconderlo.
+    candidatos_diag = sorted(
+        vivos_tendencia.keys(),
+        key=lambda t: -((vivos_tendencia[t] or {}).get("volM") or 0),
+    )
+    # Las que pasaron el embudo entero van SIEMPRE, aunque sean poco liquidas:
+    # son el resultado principal y quedarse sin su fase seria absurdo.
+    a_diagnosticar = list(dict.fromkeys(
+        tras_embudo + candidatos_diag[:TOPE_DIAG] + dudosas_diag))
+    sin_diagnosticar = [t for t in vivos_tendencia if t not in set(a_diagnosticar)]
+
+    _set(f"Fase y fuerza de {len(a_diagnosticar)} acciones…", 74)
+    diags = {t: d for t, d in _paralelo(_diag, a_diagnosticar) if d}
     _set("Cruzando fase, score y fuerza relativa…", 90)
 
     def _tarjeta(t, metricas_t):
@@ -647,6 +804,48 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         }
 
     candidatas = [_tarjeta(t, vivos[t]) for t in tras_embudo]
+
+    # ---- LAS METRICAS CRUDAS, PARA QUE LA APP PUEDA MOVER LOS FILTROS -----
+    # Sin esto, cambiar un umbral obliga a volver a correr los 4-7 minutos.
+    # Con esto, la app rehace el embudo entero en el telefono, al instante, y
+    # puede mostrar QUIENES se cayeron en cada filtro -- que es lo que pidio
+    # Cristian y lo que hacia bien el prototipo.
+    #
+    # Claves cortas a proposito: son ~534 filas y esto viaja por el celular.
+    # t ticker · n nombre · p precio · v volumen 90d (M) · c50/c200 medias
+    # cB capitalizacion (B) · gB crecimiento BPA · gV crecimiento ventas
+    # gF fuente del crecimiento (ttm|trimestral) · f fase · cf confirmaciones
+    # sc score 0-8 · fr fuerza relativa (1 sube, 0 no, null no se sabe)
+    # se sector · in industria · dg si se le calculo fase/fuerza
+    def _fila(t, m):
+        f = fund.get(t) or {}
+        d = diags.get(t) or {}
+        sem, dia = (d.get("semanal") or {}), (d.get("diario") or {})
+        frd = dia.get("fuerzaRelativa") or dia.get("fuerza_relativa") or {}
+        fr = None
+        if frd.get("disponible"):
+            fr = 1 if frd.get("pendientePositiva") else 0
+        return {
+            "t": t,
+            "n": f.get("nombre") or t,
+            "p": round(m["precio"], 2),
+            "v": m.get("volM"),
+            "c50": round(m["sma50"], 2) if m.get("sma50") else None,
+            "c200": round(m["sma200"], 2) if m.get("sma200") else None,
+            "cB": f.get("capB"),
+            "gB": f.get("crecBpa"),
+            "gV": f.get("crecVentas"),
+            "gF": f.get("crecFuente"),
+            "f": sem.get("fase") if sem.get("disponible") else None,
+            "cf": sem.get("scoreConfirmaciones") if sem.get("disponible") else None,
+            "sc": dia.get("score") if dia.get("disponible") else None,
+            "fr": fr,
+            "se": f.get("sector"),
+            "in": f.get("industria"),
+            "dg": 1 if t in diags else 0,
+        }
+
+    acciones = [_fila(t, m) for t, m in sorted(metricas.items())]
 
     def _pasa_weinstein(c):
         return c["fase"] == 2 and isinstance(c["confirmaciones"], int) and c["confirmaciones"] >= 4
@@ -751,6 +950,19 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         # puede auditar: dice si el mercado no dio nada o si Yahoo no
         # contesto.
         "fuentesFundamentales": diag_fund,
+        # Las metricas crudas de cada accion revisada. Es lo que deja mover
+        # los umbrales en la app sin volver a correr el analisis.
+        "acciones": acciones,
+        "alcance": {
+            "conFundamentales": sorted(vivos_tendencia.keys()),
+            "diagnosticadas": sorted(diags.keys()),
+            "sinDiagnosticar": sorted(sin_diagnosticar),
+            "topeDiag": TOPE_DIAG,
+            "nota": "Los fundamentales solo se pidieron para las que pasaron "
+                    "precio/volumen/tendencia, y la fase de Weinstein solo "
+                    "para las mas liquidas de esas. Aflojar un filtro mas "
+                    "alla de ese conjunto necesita volver a ejecutar.",
+        },
         "candidatas": candidatas,
         "caidas": caidas,
         "trasWeinstein": [c["ticker"] for c in tras_weinstein],
@@ -776,9 +988,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             f"seguidas. Vuelve a correrlo y sigue desde donde quedó — lo ya bajado "
             f"queda en caché 12 h."
         ] if saltadas else []) + [
-            "El crecimiento de BPA e ingresos es TRIMESTRAL contra el mismo trimestre "
-            "del año anterior (lo que entrega Yahoo), no TTM como en TradingView. "
-            "Los números no calzan exactamente; el filtro sí cumple su función.",
+            (f"El crecimiento se midió en TTM (últimos 12 meses contra los 12 "
+             f"anteriores, igual que TradingView) en {diag_fund.get('conCrecimientoTTM', 0)} "
+             f"acciones, y en trimestral YoY en "
+             f"{diag_fund.get('conCrecimientoTrimestral', 0)} donde Yahoo no entregó "
+             f"los ocho trimestres. Cada acción dice cuál se le aplicó."),
             "La capitalización se evalúa junto al crecimiento y no antes de la "
             "tendencia: los tres salen de la misma consulta, y pedirla para las "
             f"{len(metricas)} costaría cientos de peticiones desperdiciadas.",
