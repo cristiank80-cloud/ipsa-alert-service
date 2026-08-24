@@ -773,13 +773,35 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # significa que de verdad no hubo; si quedo a medias, no significa nada.
     nucleo_set = set(nucleo or ())
     nucleo_revisado = len([t for t in metricas if t in nucleo_set]) if nucleo_set else None
-    nucleo_completo = bool(nucleo_set) and nucleo_revisado >= len(nucleo_set)
+    # DOS MOTIVOS DISTINTOS, Y CONFUNDIRLOS FUE UN ERROR MIO
+    # ======================================================
+    # Un ticker del nucleo puede faltar en `metricas` por dos razones que no
+    # se parecen en nada:
+    #
+    #   1. SE SALTO POR TIEMPO. Es un problema de cobertura: la proxima
+    #      corrida lo agarra, porque lo ya bajado queda en cache 12 h. ESTE
+    #      es el caso que hay que gritar.
+    #   2. SE PIDIO Y NO HAY DATOS. Yahoo respondio que el simbolo no existe
+    #      (retirado, renombrado, fusionado -- ver la cuarentena en
+    #      data_source.py) o devolvio menos sesiones de las que necesita una
+    #      SMA 200. Volver a ejecutar NO lo arregla NUNCA.
+    #
+    # Antes los dos contaban igual, asi que dos simbolos muertos dejaban el
+    # indicador en cobre y el aviso de ATENCION encendidos para siempre --
+    # justo el ruido que hace que despues no le creas cuando el barrido SI se
+    # corto de verdad.
+    nucleo_saltado = sorted(nucleo_set & set(saltadas))
+    nucleo_sin_datos = sorted(nucleo_set - set(metricas) - set(saltadas))
+    # "Completo" = no quedo nada del nucleo sin revisar POR TIEMPO.
+    nucleo_completo = bool(nucleo_set) and not nucleo_saltado
 
     _set(f"{len(metricas)} con historial suficiente. Aplicando filtros de precio y tendencia…", 55)
     detalle_inicio = (
         f"{len(metricas)} revisadas de {len(universo)} del universo"
         + (f" · el núcleo ({len(nucleo_set)}) quedó "
-           + ("entero" if nucleo_completo else f"en {nucleo_revisado}") if nucleo_set else "")
+           + (("entero" + (f", salvo {len(nucleo_sin_datos)} sin datos en Yahoo"
+                           if nucleo_sin_datos else ""))
+              if nucleo_completo else f"en {nucleo_revisado}") if nucleo_set else "")
     )
     pasos_a, vivos = embudo(metricas, umbrales, detalle_inicio)
 
@@ -1051,6 +1073,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "nucleoTotal": len(nucleo_set) or None,
             "nucleoRevisado": nucleo_revisado,
             "nucleoCompleto": nucleo_completo if nucleo_set else None,
+            # Los que faltaron POR TIEMPO (se arregla volviendo a ejecutar) y
+            # los que faltaron porque NO HAY DATO (no se arregla nunca). Ver
+            # el comentario largo junto a nucleo_saltado.
+            "nucleoSaltadoPorTiempo": len(nucleo_saltado) if nucleo_set else None,
+            "nucleoSinDatos": nucleo_sin_datos if nucleo_set else None,
             # De donde arranco hoy el resto del mercado, y cada cuanto da la
             # vuelta completa. Ver _rotar_por_dia en universo_mercado.py.
             "rotacionMercado": rotacion,
@@ -1098,13 +1125,26 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             # con el nucleo a medias, el resultado no es comparable ni con la
             # corrida de ayer ni con TradingView.
             f"ATENCIÓN: el barrido se cortó ANTES de terminar el núcleo del "
-            f"universo (S&P 500 + Nasdaq-100 + tu grilla): se revisaron "
-            f"{nucleo_revisado} de {len(nucleo_set)}. Las candidatas de esta "
-            f"corrida salen solo de esa parte, así que un número bajo acá NO "
-            f"quiere decir que el mercado no tenga nada. Vuelve a ejecutar: lo "
-            f"ya bajado queda en caché 12 h y la próxima corrida sigue desde "
+            f"universo (S&P 500 + Nasdaq-100 + tu grilla): quedaron "
+            f"{len(nucleo_saltado)} de {len(nucleo_set)} sin alcanzar a "
+            f"revisarse por falta de tiempo. Las candidatas de esta corrida "
+            f"salen solo de esa parte, así que un número bajo acá NO quiere "
+            f"decir que el mercado no tenga nada. Vuelve a ejecutar: lo ya "
+            f"bajado queda en caché 12 h y la próxima corrida sigue desde "
             f"donde quedó."
         ] if nucleo_set and not nucleo_completo else []) + ([
+            # Informativa, NO ATENCIÓN: volver a ejecutar no cambia nada acá.
+            # Se nombran los símbolos porque la acción que corresponde es
+            # editar la lista en main.py, y para eso hay que saber cuáles son.
+            f"{len(nucleo_sin_datos)} símbolo(s) del núcleo se pidieron pero "
+            f"Yahoo no devolvió historial usable: "
+            f"{', '.join(nucleo_sin_datos[:12])}"
+            f"{'…' if len(nucleo_sin_datos) > 12 else ''}. Suele ser un papel "
+            f"retirado, renombrado o fusionado, o uno con menos de 200 sesiones "
+            f"(no alcanza para la SMA 200). Volver a ejecutar no los recupera: "
+            f"si alguno ya no existe, sácalo de la lista en main.py y dejas de "
+            f"gastar una petición en él cada corrida."
+        ] if nucleo_sin_datos else []) + ([
             f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
             f"del universo ({round(len(metricas)/max(1,len(universo))*100)} %). "
             f"Quedaron {len(saltadas)} sin revisar porque se acabó el presupuesto "
