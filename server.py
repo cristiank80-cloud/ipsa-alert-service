@@ -51,7 +51,7 @@ from data_source import (get_market_data, get_stats, get_price_history,
                          filtrar_puntos_por_periodo,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
-from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS
+from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR
 import fuente_bolsa
 import fuente_df
 import ipsa_historico
@@ -60,6 +60,7 @@ import notify
 import signals
 import indicador_fuerza_fase
 import explorar
+import universo_mercado
 
 app = Flask(__name__)
 CORS(app)
@@ -1778,10 +1779,19 @@ def universo_diag():
         "analisis": {
             "total": len(UNIVERSO_ANALISIS),
             "solo_en_analisis": len(solo_analisis),
-            "nota": ("Universo del embudo (S&P 500 + Nasdaq-100 + la grilla). "
-                     "Solo se recorre cuando se pide el analisis a mano, "
-                     "NUNCA en el ciclo automatico."),
+            "nota": ("Universo BASE del embudo (S&P 500 + Nasdaq-100 + la "
+                     "grilla). /explorar/run lo amplia con el mercado "
+                     "completo -- ver 'mercado_completo' aca abajo. Solo se "
+                     "recorre cuando se pide el analisis a mano, NUNCA en "
+                     "el ciclo automatico."),
         },
+        "mercado_completo": dict(
+            universo_mercado.estado_cache(),
+            nota_extra=("Se une al universo base en cada /explorar/run "
+                        "(sin duplicar, sin ETF). Si 'motivo_error' no es "
+                        "null, la ultima corrida uso solo el universo base "
+                        "-- revisa ese texto."),
+        ),
         "cuarentena": {
             "total": len(muertos),
             "simbolos": muertos,
@@ -1819,6 +1829,13 @@ def explorar_run():
 
     Parametros opcionales (para mover los umbrales del embudo desde la app):
       ?precio=10&capB=2&volM=2&crecimiento=25
+
+    UNIVERSO: se amplia UNIVERSO_ANALISIS (S&P 500 + Nasdaq-100 + grilla)
+    con el mercado completo de EE.UU. via universo_mercado.py -- a pedido
+    de Cristian, para que el embudo mire lo mismo que TradingView mira
+    cuando no se le fija un indice. Si esa descarga falla (o nunca se pudo
+    hacer), sigue con el universo base solo: nunca bloquea la corrida. Ver
+    universo_mercado.py para el detalle.
     """
     def _num(nombre):
         v = request.args.get(nombre)
@@ -1828,14 +1845,17 @@ def explorar_run():
             return None
 
     umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento")}
+    universo, info_universo = universo_mercado.ampliar_universo(
+        UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR)
     arranco, motivo = explorar.iniciar(
-        UNIVERSO_ANALISIS, lambda t: _serie5y_ticker(t, True),
+        universo, lambda t: _serie5y_ticker(t, True),
         lambda: _indice5y("usa"), umbrales)
 
     if not arranco:
         return jsonify({"arrancado": False, "motivo": motivo,
                         "estado": explorar.estado()}), 409
-    return jsonify({"arrancado": True, "universo": len(UNIVERSO_ANALISIS),
+    return jsonify({"arrancado": True, "universo": len(universo),
+                    "universoInfo": info_universo,
                     "estado": explorar.estado()})
 
 
