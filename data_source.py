@@ -240,20 +240,16 @@ def quote_summary(symbol, modules):
 _QUOTE_V7 = "https://query1.finance.yahoo.com/v7/finance/quote"
 
 
-def market_caps(symbols, tam_lote=40):
+def _quote_v7_filas(symbols, tam_lote=40):
     """
-    Capitalizacion de MUCHOS simbolos por lote. Devuelve (dict, motivos).
+    Pide v7/finance/quote de a lotes y devuelve (filas_crudas, motivos).
 
-    POR QUE EXISTE ADEMAS DE quote_summary()
-    =========================================
-    Este endpoint acepta symbols=A,B,C: 127 acciones son 4 peticiones en vez
-    de 127. Y sobre todo es una SEGUNDA fuente para el unico dato que dejo el
-    embudo en cero. Si quoteSummary falla pero este responde, el analisis
-    igual puede filtrar por capitalizacion en vez de descartarlo todo.
-
-    dict: {"NVDA": 5200.0, ...} en miles de millones de USD.
+    Es la parte compartida por market_caps() y metricas_por_lote(): la misma
+    peticion trae capitalizacion, precio, medias moviles y volumen medio, asi
+    que no tiene ningun sentido pedirla dos veces. Ver metricas_por_lote para
+    por que esto importa tanto.
     """
-    caps, motivos = {}, []
+    filas, motivos = [], []
     lotes = [symbols[i:i + tam_lote] for i in range(0, len(symbols), tam_lote)]
     for lote in lotes:
         conseguido = False
@@ -269,14 +265,10 @@ def market_caps(symbols, tam_lote=40):
                 break
             if resp.status_code == 200:
                 try:
-                    filas = ((resp.json().get("quoteResponse") or {}).get("result") or [])
+                    filas.extend((resp.json().get("quoteResponse") or {}).get("result") or [])
                 except ValueError:
                     motivos.append("200 pero el cuerpo no es JSON")
                     break
-                for f in filas:
-                    sim, cap = f.get("symbol"), f.get("marketCap")
-                    if sim and isinstance(cap, (int, float)) and cap > 0:
-                        caps[sim] = round(cap / 1e9, 2)
                 conseguido = True
                 break
             if resp.status_code in (401, 403) and intento == 0:
@@ -285,7 +277,113 @@ def market_caps(symbols, tam_lote=40):
             break
         if not conseguido and not motivos:
             motivos.append("lote sin respuesta")
-    return caps, sorted(set(motivos))
+    return filas, sorted(set(motivos))
+
+
+def market_caps(symbols, tam_lote=40):
+    """
+    Capitalizacion de MUCHOS simbolos por lote. Devuelve (dict, motivos).
+
+    POR QUE EXISTE ADEMAS DE quote_summary()
+    =========================================
+    Este endpoint acepta symbols=A,B,C: 127 acciones son 4 peticiones en vez
+    de 127. Y sobre todo es una SEGUNDA fuente para el unico dato que dejo el
+    embudo en cero. Si quoteSummary falla pero este responde, el analisis
+    igual puede filtrar por capitalizacion en vez de descartarlo todo.
+
+    dict: {"NVDA": 5200.0, ...} en miles de millones de USD.
+    """
+    filas, motivos = _quote_v7_filas(symbols, tam_lote)
+    caps = {}
+    for f in filas:
+        sim, cap = f.get("symbol"), f.get("marketCap")
+        if sim and isinstance(cap, (int, float)) and cap > 0:
+            caps[sim] = round(cap / 1e9, 2)
+    return caps, motivos
+
+
+def _pos(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+
+
+def _no_neg(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
+
+
+def metricas_por_lote(symbols, tam_lote=40):
+    """
+    Precio, SMA 50, SMA 200 y volumen medio de MUCHOS simbolos a la vez.
+
+    POR QUE ESTO CAMBIA TODO
+    =========================
+    El paso mas lento del embudo era bajar UN HISTORIAL DE UN AÑO POR CADA
+    SIMBOLO para calcular cuatro numeros: precio, media de 50, media de 200 y
+    volumen medio. Con 5.254 simbolos eso son 5.254 peticiones -- unos 50
+    minutos, que Render gratuito no aguanta. De ahi salio todo el problema de
+    cobertura (ver PASOS-FIX-ORDEN.md y la rotacion diaria).
+
+    Pero Yahoo YA CALCULA esos cuatro numeros y los entrega en el mismo
+    endpoint por lotes que este archivo usaba solo para la capitalizacion:
+    fiftyDayAverage, twoHundredDayAverage y averageDailyVolume3Month vienen
+    junto a marketCap, de a 40 simbolos por peticion. El mercado completo pasa
+    de 5.254 peticiones a ~131.
+
+    LO QUE ESTO NO REEMPLAZA
+    ========================
+    La fase de Weinstein y la fuerza relativa necesitan la serie completa de
+    precios, y eso Yahoo no lo resume en un numero. Pero eso ya se calcula
+    solo para un grupo chico (las que pasan el embudo mas las mas liquidas,
+    ver TOPE_DIAG), asi que no cambia.
+
+    OJO CON LAS DIFERENCIAS
+    =======================
+    Estos numeros son de Yahoo, no calculados aca, y pueden no calzar EXACTO
+    con los que salian de la serie:
+      - `precio` es el precio actual (puede ser intradia), no el ultimo cierre.
+      - `volumen` es el promedio de 3 meses de Yahoo; el de la serie era el
+        promedio de los ultimos 90 puntos. Son lo mismo conceptualmente, no
+        necesariamente al decimal.
+    Por eso explorar.py compara una muestra contra el metodo viejo en cada
+    corrida y lo informa -- ver `comparacionLote` en el resultado.
+
+    Devuelve (dict, diag). dict: simbolo -> {precio, sma50, sma200, volM, capB}
+    """
+    filas, motivos = _quote_v7_filas(symbols, tam_lote)
+    out, incompletos, respondieron = {}, [], set()
+    for f in filas:
+        sim = f.get("symbol")
+        if not sim:
+            continue
+        respondieron.add(sim)
+        precio = f.get("regularMarketPrice")
+        sma50 = f.get("fiftyDayAverage")
+        sma200 = f.get("twoHundredDayAverage")
+        vol = f.get("averageDailyVolume3Month")
+        # El volumen puede ser 0 de verdad (papel sin liquidez) y eso NO es un
+        # dato faltante: es un dato que va a botar la accion en su filtro. Los
+        # otros tres en 0 si serian un dato que Yahoo no entrego.
+        if not (_pos(precio) and _pos(sma50) and _pos(sma200) and _no_neg(vol)):
+            incompletos.append(sim)
+            continue
+        cap = f.get("marketCap")
+        out[sim] = {
+            "precio": float(precio),
+            "sma50": float(sma50),
+            "sma200": float(sma200),
+            "volM": round(float(vol) / 1e6, 2),
+            "capB": round(float(cap) / 1e9, 2) if _pos(cap) else None,
+            "fuente": "lote",
+        }
+    return out, {
+        "pedidos": len(symbols),
+        "peticiones": -(-len(symbols) // max(1, tam_lote)),
+        "conMetricas": len(out),
+        # Contestaron pero les faltaba alguno de los tres numeros.
+        "incompletos": sorted(incompletos),
+        # Ni siquiera aparecieron en la respuesta (simbolo que no existe).
+        "sinRespuesta": sorted(set(symbols) - respondieron),
+        "motivos": motivos,
+    }
 
 
 # --------------------------------------------------------------------------

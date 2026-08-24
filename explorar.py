@@ -156,6 +156,31 @@ _WORKERS = 3
 # sabian.
 TOPE_DESCARGA_SEG = int(__import__("os").environ.get("EXPLORAR_TOPE_SEG", 6 * 60))
 
+# ===========================================================================
+# EL CAMINO RAPIDO (ago-2026): PRECIO Y MEDIAS POR LOTE
+# ===========================================================================
+# Todo el bloque de arriba describe un problema que ahora tiene otra
+# solucion, mucho mejor: Yahoo YA CALCULA el precio, las dos medias moviles y
+# el volumen medio, y los entrega de a 40 simbolos por peticion en el mismo
+# endpoint que este modulo ya usaba para la capitalizacion. El mercado
+# completo pasa de 5.254 peticiones a ~131. Ver data_source.metricas_por_lote.
+#
+# El camino de arriba (una serie por simbolo) NO se borro: sigue siendo el
+# respaldo para lo que el lote no resuelva, y sigue siendo la unica forma de
+# calcular la fase de Weinstein y la fuerza relativa, que necesitan la serie
+# completa. Si el endpoint por lotes se cae, todo se comporta como antes.
+#
+# Se puede apagar con EXPLORAR_USAR_LOTE=0 en Render sin tocar el codigo, por
+# si Yahoo cambia el endpoint y hay que volver al camino viejo con urgencia.
+USAR_LOTE = __import__("os").environ.get("EXPLORAR_USAR_LOTE", "1") != "0"
+TAM_LOTE = int(__import__("os").environ.get("EXPLORAR_TAM_LOTE", 40))
+
+# Cuantas acciones se verifican comparando el numero del lote contra el
+# calculado desde la serie, en cada corrida. Cuesta una peticion por cada una
+# y es lo unico que convierte "los numeros de Yahoo deberian calzar" en un
+# dato medido. Con 0 se apaga.
+TOPE_VERIFICAR = int(__import__("os").environ.get("EXPLORAR_VERIFICAR", 6))
+
 # Cuantas "dudosas" (las que se cayeron por falta de dato, no por no cumplir)
 # se diagnostican igual. Cada una cuesta una serie de 5 años, asi que no
 # pueden ser todas. Se ordenan alfabeticamente para que el corte sea estable
@@ -541,6 +566,71 @@ def _metricas_de_serie(puntos):
     }
 
 
+def _dif_pct(a, b):
+    """Diferencia relativa entre dos numeros, en %. None si no se puede."""
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        return None
+    if not b:
+        return None
+    return round(abs(a - b) / abs(b) * 100, 2)
+
+
+def _comparar_lote(metricas, cuantas=None):
+    """
+    Toma una muestra de las que vinieron por lote, baja su serie y compara.
+
+    POR QUE EXISTE
+    ==============
+    Los cuatro numeros del camino rapido los calcula Yahoo, no este codigo.
+    Cambiar de fuente sin comprobar nada seria exactamente el tipo de cosa
+    que despues aparece como "el embudo da distinto y nadie sabe por que".
+    Esto lo mide en la misma corrida, sobre acciones de verdad, y lo deja
+    escrito en el resultado.
+
+    NO corta ni corrige nada: solo informa. Si un dia las diferencias se
+    disparan, se ve en el resultado y ahi se decide.
+    """
+    cuantas = TOPE_VERIFICAR if cuantas is None else cuantas
+    del_lote = sorted(t for t, m in metricas.items()
+                      if (m or {}).get("fuente") == "lote")
+    if not cuantas or not del_lote:
+        return None
+    # Las mas liquidas primero: son las que de verdad van a salir como
+    # candidatas, y una diferencia ahi importa mucho mas que en una micro cap.
+    muestra = sorted(del_lote,
+                     key=lambda t: -((metricas[t] or {}).get("volM") or 0))[:cuantas]
+    filas, difs = [], {"precio": [], "sma50": [], "sma200": [], "volM": []}
+    for t in muestra:
+        serie = _metricas_de_serie(_serie_1y(t))
+        if not serie:
+            continue
+        lote = metricas[t]
+        fila = {"ticker": t}
+        for campo in ("precio", "sma50", "sma200", "volM"):
+            d = _dif_pct(lote.get(campo), serie.get(campo))
+            fila[campo] = {"lote": lote.get(campo), "serie": serie.get(campo),
+                           "difPct": d}
+            if d is not None:
+                difs[campo].append(d)
+        filas.append(fila)
+    if not filas:
+        return None
+    peor = {c: (round(max(v), 2) if v else None) for c, v in difs.items()}
+    # El precio es el que MAS puede diferir legitimamente (el del lote es
+    # intradia, el de la serie es el ultimo cierre), asi que no manda en el
+    # veredicto. Las medias y el volumen si tienen que calzar.
+    criticos = [peor[c] for c in ("sma50", "sma200", "volM") if peor[c] is not None]
+    return {
+        "comparadas": len(filas),
+        "peorDifPct": peor,
+        "calza": bool(criticos) and max(criticos) <= 2.0,
+        "detalle": filas,
+        "nota": "El precio del lote es el actual (puede ser intradía) y el de "
+                "la serie es el último cierre: que difieran es normal. Las "
+                "medias y el volumen sí deberían calzar dentro de ~2%.",
+    }
+
+
 def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"):
     """
     Aplica los 7 filtros y devuelve (pasos, sobrevivientes_por_etapa).
@@ -721,12 +811,39 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     for grupo in (sectores, industrias):
         grupo.sort(key=lambda x: (x["fuerza"].get("m12") is None, -(x["fuerza"].get("m12") or 0)))
 
-    # ---- Paso 2a · filtros que salen de la serie de precios ---------------
-    # La etapa larga. Se reporta de a cuantas van, y se corta si se pasa del
-    # presupuesto de tiempo -- ver TOPE_DESCARGA_SEG.
-    # Primero las que ya estan en cache (gratis), despues las que faltan.
-    # Ver el comentario de TOPE_DESCARGA_SEG: si se acaba el tiempo, lo que
-    # queda sin revisar son acciones nuevas, nunca las que ya se sabian.
+    # ---- Paso 2a · precio, volumen y medias -------------------------------
+    # ESTA ERA LA ETAPA LENTA, Y YA NO LO ES.
+    #
+    # Antes: un historial de un año POR CADA simbolo, para sacar cuatro
+    # numeros. 5.254 simbolos = 5.254 peticiones = ~50 minutos, que Render
+    # gratuito no aguanta. Todo el problema de cobertura (el nucleo que no se
+    # alcanzaba a revisar, la rotacion diaria del resto) salia de aca.
+    #
+    # Ahora: Yahoo ya calcula esos cuatro numeros y los entrega de a 40
+    # simbolos por peticion, en el MISMO endpoint que este modulo ya usaba
+    # para la capitalizacion. El mercado completo pasa a ~131 peticiones.
+    # Ver data_source.metricas_por_lote.
+    #
+    # El camino viejo NO se borro: queda como respaldo para los simbolos a los
+    # que el lote no les trajo los tres numeros. Si el endpoint por lotes se
+    # cayera entero, `faltan` seria el universo completo y esto se comporta
+    # exactamente como antes, presupuesto de tiempo incluido.
+    metricas, diag_lote = {}, None
+    if USAR_LOTE:
+        _set(f"Precio y medias de {len(universo)} acciones, de a "
+             f"{TAM_LOTE} por petición…", 20)
+        try:
+            metricas, diag_lote = data_source.metricas_por_lote(universo, TAM_LOTE)
+        except Exception as e:
+            print(f"[explorar] El camino por lotes fallo entero "
+                  f"({type(e).__name__}: {e}). Sigo con el metodo de siempre.")
+            metricas, diag_lote = {}, {"error": f"{type(e).__name__}: {e}"}
+        print(f"[explorar] Lote: {len(metricas)} de {len(universo)} con "
+              f"métricas en {(diag_lote or {}).get('peticiones', '?')} peticiones.")
+
+    # Los que el lote no resolvio van por el camino viejo, respetando el
+    # presupuesto de tiempo. El NUCLEO va primero, por lo mismo de siempre.
+    faltan = [t for t in universo if t not in metricas]
     ahora = time.time()
     with _SERIES_LOCK:
         # Las claves de la cache son "TICKER|rango" desde que el benchmark y
@@ -737,12 +854,13 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         frescas = {clave.split("|", 1)[0]
                    for clave, c in _SERIES_CACHE.items()
                    if clave.endswith("|1y") and (ahora - c["ts"]) <= TTL_SERIE}
-    en_cache = [t for t in universo if t in frescas]
-    por_bajar = [t for t in universo if t not in frescas]
+    en_cache = [t for t in faltan if t in frescas]
+    por_bajar = [t for t in faltan if t not in frescas]
     orden = en_cache + por_bajar
 
-    _set(f"{len(en_cache)} ya en caché · bajando hasta "
-         f"{TOPE_DESCARGA_SEG // 60} min de las {len(por_bajar)} que faltan…", 18)
+    if orden:
+        _set(f"{len(en_cache)} ya en caché · bajando hasta "
+             f"{TOPE_DESCARGA_SEG // 60} min de las {len(por_bajar)} que faltan…", 30)
     t_desc = time.time()
     hechos, saltadas = [0], []
     lock_cnt = threading.Lock()
@@ -753,20 +871,30 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             saltadas.append(t)
             return t, None
         m = _metricas_de_serie(_serie_1y(t))
+        if m:
+            m["fuente"] = "serie"
         with lock_cnt:
             hechos[0] += 1
             n = hechos[0]
         if n % 20 == 0 or n == len(orden):
-            pct = 18 + int(34 * n / max(1, len(orden)))   # 18 -> 52
+            pct = 30 + int(22 * n / max(1, len(orden)))   # 30 -> 52
             _set(f"Historiales: {n} de {len(orden)} · "
                  f"{int(time.time() - t_desc)}s", pct)
         return t, m
 
-    metricas = {t: m for t, m in _paralelo(_serie_uno, orden) if m}
+    if orden:
+        metricas.update({t: m for t, m in _paralelo(_serie_uno, orden) if m})
     if saltadas:
         print(f"[explorar] Presupuesto de tiempo agotado: {len(saltadas)} "
               f"sin revisar de {len(universo)}. Vuelve a correr el analisis y "
               f"seguira desde donde quedo -- lo bajado queda en cache 12h.")
+
+    # ---- La comprobacion que hace auditable el camino nuevo ---------------
+    # Los numeros del lote son de Yahoo, no calculados aca. Antes de creerles
+    # a ciegas sobre 5.000 acciones, se toma una muestra chica y se compara
+    # contra el metodo viejo, en la misma corrida. Cuesta unas pocas
+    # peticiones y es lo unico que convierte "deberia calzar" en un dato.
+    comparacion = _comparar_lote(metricas) if (USAR_LOTE and metricas) else None
     # CUANTO DEL NUCLEO SE ALCANZO A REVISAR. Es la unica cifra que dice si el
     # resultado se puede comparar con corridas anteriores (y con TradingView
     # restringido a los indices): si el nucleo quedo entero, "0 candidatas"
@@ -820,6 +948,27 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # crecimiento sin volver a correr nada.
     vivos_tendencia = dict(vivos)
     fund, diag_fund = fundamentales(sorted(vivos.keys()))
+    # LA CAPITALIZACION YA VINO GRATIS EN EL LOTE.
+    # Es el mismo endpoint que trajo precio y medias, asi que no cuesta ni una
+    # peticion extra. Se usa SOLO para rellenar lo que fundamentales() no
+    # trajo: si quoteSummary contesto, ese dato manda. Esto achica la lista de
+    # "para mirar a mano", que se llenaba de acciones cuyo unico problema era
+    # que Yahoo no habia entregado la capitalizacion por el otro camino.
+    rescatadas_cap = 0
+    for t in vivos:
+        cap_lote = (metricas.get(t) or {}).get("capB")
+        if not isinstance(cap_lote, (int, float)):
+            continue
+        ficha = fund.setdefault(t, {})
+        if not isinstance(ficha.get("capB"), (int, float)):
+            ficha["capB"] = cap_lote
+            rescatadas_cap += 1
+    if rescatadas_cap:
+        diag_fund = dict(diag_fund or {})
+        diag_fund["conCapitalizacion"] = (diag_fund.get("conCapitalizacion") or 0) + rescatadas_cap
+        diag_fund["rescatadasDelLote"] = rescatadas_cap
+        print(f"[explorar] {rescatadas_cap} capitalizaciones rescatadas del "
+              f"lote (quoteSummary no las trajo).")
     pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(
         vivos, fund, umbrales, sin_fundamentales)
     pasos = pasos_a + pasos_b
@@ -1065,6 +1214,14 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "seCortoPorTiempo": bool(saltadas),
             "cobertura": round(len(metricas) / max(1, len(universo)) * 100, 1),
             "veniaEnCache": len(en_cache),
+            # De donde salieron precio/medias/volumen. Ver metricas_por_lote:
+            # `porLote` es el camino rapido, `porSerie` el respaldo de siempre.
+            "metricasPorLote": sum(1 for m in metricas.values()
+                                   if (m or {}).get("fuente") == "lote"),
+            "metricasPorSerie": sum(1 for m in metricas.values()
+                                    if (m or {}).get("fuente") == "serie"),
+            "diagLote": diag_lote,
+            "comparacionLote": comparacion,
             "sinDatoFundamental": sin_dato,
             "tickers": tras_embudo,
             # El nucleo = S&P 500 + Nasdaq-100 + la grilla. Ver el comentario
