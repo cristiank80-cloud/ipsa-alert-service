@@ -51,7 +51,7 @@ from data_source import (get_market_data, get_stats, get_price_history,
                          filtrar_puntos_por_periodo,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
-from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR
+from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR, SIN_FUNDAMENTALES
 import fuente_bolsa
 import fuente_df
 import ipsa_historico
@@ -1866,10 +1866,19 @@ def explorar_run():
     # El nucleo va aparte para que explorar.py pueda decir si alcanzo a
     # revisarlo entero -- sin ese dato, un "0 candidatas" no se distingue de
     # un barrido que se corto antes de llegar a las acciones que importan.
+    # La rotacion diaria (ver _rotar_por_dia en universo_mercado.py) es lo que
+    # garantiza que el "resto" del mercado no arranque siempre en el mismo
+    # punto del abecedario despues de cada reinicio de Render -- sin estado
+    # persistido, solo con la fecha de hoy.
     arranco, motivo = explorar.iniciar(
         universo, lambda t: _serie5y_ticker(t, True),
         lambda: _indice5y("usa"), umbrales,
-        nucleo=set(UNIVERSO_ANALISIS) - set(ETFS_NO_ANALIZAR))
+        nucleo=set(UNIVERSO_ANALISIS) - set(ETFS_NO_ANALIZAR),
+        rotacion=info_universo.get("rotacion"),
+        # Bitcoin (y lo que se agregue despues a SIN_FUNDAMENTALES en
+        # main.py) no tiene capitalizacion ni crecimiento de empresa -- ver
+        # el comentario largo junto a SIN_FUNDAMENTALES.
+        sin_fundamentales=SIN_FUNDAMENTALES)
 
     if not arranco:
         return jsonify({"arrancado": False, "motivo": motivo,

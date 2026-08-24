@@ -113,6 +113,18 @@ TICKERS_USA = [
     # Paysign, WisdomTree.
     "SKWD", "ERO", "ENVA", "PAYS", "WT",
 
+    # --- Cripto (agosto 2026, a pedido de Cristian) ---
+    # Yahoo entrega BTC-USD por el mismo endpoint de precio/historial que
+    # cualquier accion (ver data_source.get_market_data, suffix=""), asi que
+    # no necesita ningun codigo aparte para aparecer en la grilla ni para
+    # que Explorar le baje el historial. Lo que SI es distinto: no tiene
+    # capitalizacion bursatil ni crecimiento de utilidades/ingresos como una
+    # empresa, asi que esos tres filtros de Explorar no se le pueden aplicar
+    # -- ver SIN_FUNDAMENTALES mas abajo. Lo que SI se le calcula igual que
+    # al resto: precio, volumen, tendencia, fase de Weinstein y fuerza
+    # relativa contra el indice.
+    "BTC-USD",
+
     # -----------------------------------------------------------------------
     # NASDAQ-100 (agosto 2026)
     # -----------------------------------------------------------------------
@@ -307,3 +319,27 @@ ETFS_NO_ANALIZAR = [t for t in ETFS_NO_ANALIZAR if t != "WT"]
 # ETF, por lo que dice el comentario de arriba.
 UNIVERSO_ANALISIS = sorted(
     (set(SP500) | set(NASDAQ100) | set(TICKERS_USA)) - set(ETFS_NO_ANALIZAR))
+
+# ---------------------------------------------------------------------------
+# ACTIVOS SIN FUNDAMENTALES DE EMPRESA (Bitcoin, y lo que se agregue despues)
+# ---------------------------------------------------------------------------
+# Distinto de ETFS_NO_ANALIZAR de arriba -- ojo con la diferencia:
+#
+#   ETFS_NO_ANALIZAR   = NO entra al embudo de Explorar. Se ve el precio en
+#                         la grilla y nada mas: ni fase de Weinstein, ni
+#                         fuerza relativa, ni los siete filtros del metodo.
+#   SIN_FUNDAMENTALES  = SI entra al embudo entero -- precio, volumen,
+#                         tendencia, fase de Weinstein, fuerza relativa --
+#                         pero SOLO salta los tres filtros que necesitan que
+#                         el ticker sea una empresa: capitalizacion
+#                         bursatil, crecimiento del BPA, crecimiento de
+#                         ingresos. Una criptomoneda no tiene nada de eso
+#                         (no hay "utilidades" ni "acciones en circulacion"),
+#                         asi que exigirselo la sacaria del embudo por un
+#                         motivo que no tiene que ver con si es una buena
+#                         entrada tecnica o no.
+#
+# A diferencia de un ETF (que es un fondo, no algo que "elegir" con este
+# metodo), Bitcoin SI es candidato de una primera alerta tecnica -- por eso
+# entra al embudo completo en vez de quedar excluido como los ETF.
+SIN_FUNDAMENTALES = {"BTC-USD"}

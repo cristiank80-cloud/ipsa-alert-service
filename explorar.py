@@ -581,7 +581,7 @@ def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"
     return pasos, vivos
 
 
-def embudo_fundamental(vivos, fund, umbrales):
+def embudo_fundamental(vivos, fund, umbrales, sin_fundamentales=None):
     """
     Segunda mitad del embudo: los tres filtros que necesitan Yahoo.
 
@@ -597,7 +597,18 @@ def embudo_fundamental(vivos, fund, umbrales):
     dato falto. Pasaron todos los filtros que SI se pudieron medir. En
     TradingView, que es donde Cristian va a mirar igual, ese dato esta a la
     vista en dos segundos.
+
+    SIN_FUNDAMENTALES ES OTRA COSA DISTINTA A "DUDOSA"
+    ====================================================
+    Un ticker en `sin_fundamentales` (Bitcoin, ver main.py) no es que Yahoo
+    no le haya entregado el dato: es que el dato NO EXISTE, porque no es una
+    empresa. Meterlo en `dudosas` seria mentir ("le falto medir esto") sobre
+    algo que nunca se iba a poder medir. Por eso a estos tickers los tres
+    filtros de esta funcion los dejan pasar directo, sin marca de duda y sin
+    sumar a `sin_dato` -- el resto del embudo (precio, volumen, tendencia,
+    Weinstein, fuerza relativa) SI se les aplica igual que a cualquiera.
     """
+    sin_fund = set(sin_fundamentales or ())
     pasos = []
     sin_dato = {"capB": 0, "crecBpa": 0, "crecVentas": 0}
     dudosas = {}          # ticker -> [campos que faltaron]
@@ -606,6 +617,9 @@ def embudo_fundamental(vivos, fund, umbrales):
         nonlocal vivos
         nuevos = {}
         for t, m in vivos.items():
+            if t in sin_fund:
+                nuevos[t] = m
+                continue
             v = (fund.get(t) or {}).get(campo)
             if not isinstance(v, (int, float)):
                 sin_dato[campo] += 1
@@ -669,7 +683,8 @@ def resultado():
     return _RESULTADO["datos"]
 
 
-def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
+def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=None,
+              sin_fundamentales=None):
     """
     El pipeline completo. `serie_5y(ticker)` y `indice_5y()` los inyecta
     server.py para reusar SU cache de 24h -- este modulo no la duplica.
@@ -783,7 +798,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
     # crecimiento sin volver a correr nada.
     vivos_tendencia = dict(vivos)
     fund, diag_fund = fundamentales(sorted(vivos.keys()))
-    pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(vivos, fund, umbrales)
+    pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(
+        vivos, fund, umbrales, sin_fundamentales)
     pasos = pasos_a + pasos_b
     tras_embudo = sorted(vivos.keys())
     # Las dudosas tambien se diagnostican: si ademas resultan estar en fase 2
@@ -872,6 +888,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
             # Para ir directo a mirarla en TradingView, que es donde Cristian
             # hace el analisis de verdad. Este modulo es la PRIMERA ALERTA.
             "tradingview": f"https://www.tradingview.com/symbols/{t}/",
+            # Para que la app pueda decir "sin datos de empresa" en vez de
+            # dejar los campos en blanco sin explicar por que -- ver
+            # SIN_FUNDAMENTALES en main.py.
+            "sinFundamentales": t in (sin_fundamentales or ()),
         }
 
     candidatas = [_tarjeta(t, vivos[t]) for t in tras_embudo]
@@ -888,6 +908,9 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
     # gF fuente del crecimiento (ttm|trimestral) · f fase · cf confirmaciones
     # sc score 0-8 · fr fuerza relativa (1 sube, 0 no, null no se sabe)
     # se sector · in industria · dg si se le calculo fase/fuerza
+    # sf si es un activo SIN_FUNDAMENTALES (Bitcoin): el telefono necesita
+    # saberlo para que mover los sliders de capitalizacion/crecimiento no lo
+    # bote del embudo recalculado -- esos tres filtros no se le aplican.
     def _fila(t, m):
         f = fund.get(t) or {}
         d = diags.get(t) or {}
@@ -914,6 +937,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
             "se": f.get("sector"),
             "in": f.get("industria"),
             "dg": 1 if t in diags else 0,
+            "sf": 1 if t in (sin_fundamentales or ()) else 0,
         }
 
     acciones = [_fila(t, m) for t, m in sorted(metricas.items())]
@@ -980,6 +1004,12 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
         revisar_a_mano.append(c)
     revisar_a_mano.sort(key=lambda c: -(c["score"] or 0))
 
+    # Cuales activos SIN_FUNDAMENTALES (Bitcoin) se revisaron de verdad esta
+    # corrida -- para la nota de abajo. Si BTC no alcanzo a bajarse por el
+    # presupuesto de tiempo, no tiene sentido explicar un filtro que no se
+    # le aplico a nadie.
+    sin_fund_revisados = sorted(set(sin_fundamentales or ()) & set(metricas.keys()))
+
     # LA PRIMERA ALERTA: lo unico que hay que leer si vas apurado.
     alerta = {
         "cuantas": len(finalistas),
@@ -1021,6 +1051,12 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
             "nucleoTotal": len(nucleo_set) or None,
             "nucleoRevisado": nucleo_revisado,
             "nucleoCompleto": nucleo_completo if nucleo_set else None,
+            # De donde arranco hoy el resto del mercado, y cada cuanto da la
+            # vuelta completa. Ver _rotar_por_dia en universo_mercado.py.
+            "rotacionMercado": rotacion,
+            # Que activos de esta corrida saltaron capitalizacion/crecimiento
+            # porque no aplican (Bitcoin) -- ver SIN_FUNDAMENTALES en main.py.
+            "sinFundamentales": sin_fund_revisados,
         },
         # De donde salieron (o no salieron) capitalizacion y crecimiento.
         # Esto es lo que convierte "0 candidatas" en una respuesta que se
@@ -1075,7 +1111,26 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
             f"de tiempo: Yahoo estrangula las peticiones cuando le llegan cientos "
             f"seguidas. Vuelve a correrlo y sigue desde donde quedó — lo ya bajado "
             f"queda en caché 12 h."
-        ] if saltadas else []) + [
+        ] if saltadas else []) + ([
+            # Informativa, no ATENCIÓN: esto es esperado y normal, no un
+            # problema. Sin esto, "por qué salieron acciones distintas hoy
+            # que ayer, si aprete lo mismo" no tiene respuesta a mano.
+            f"El resto del mercado (fuera del núcleo) se cubre de a poco: hoy "
+            f"le tocó desde el símbolo {rotacion['offsetHoy']} de "
+            f"{rotacion['totalResto']} de esa lista, y mañana empieza en otro "
+            f"punto — con el paso de hoy, una vuelta completa toma "
+            f"~{rotacion['periodoDias']} días. Por eso qué candidatas "
+            f"aparecen fuera del núcleo puede cambiar día a día aunque "
+            f"nada más cambie."
+        ] if rotacion and rotacion.get("totalResto") else []) + ([
+            # Tambien informativa: explica por que estos tickers pueden
+            # aparecer sin capitalizacion/crecimiento y aun asi ser
+            # candidatas, sin que parezca un dato faltante de Yahoo.
+            f"{', '.join(sin_fund_revisados)} no tiene capitalización bursátil ni "
+            f"crecimiento de utilidades o ingresos como una empresa, así que esos "
+            f"tres filtros no se le aplicaron — sí se le calculó precio, volumen, "
+            f"tendencia, fase de Weinstein y fuerza relativa, igual que al resto."
+        ] if sin_fund_revisados else []) + [
             (f"El crecimiento se midió en TTM (últimos 12 meses contra los 12 "
              f"anteriores, igual que TradingView) en {diag_fund.get('conCrecimientoTTM', 0)} "
              f"acciones, y en trimestral YoY en "
@@ -1092,7 +1147,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
     }
 
 
-def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None):
+def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None, rotacion=None,
+            sin_fundamentales=None):
     """
     Arranca el analisis en un hilo. Devuelve (arrancó, motivo).
 
@@ -1116,7 +1172,8 @@ def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None):
 
     def _correr():
         try:
-            datos = _analizar(universo, serie_5y, indice_5y, umb, nucleo)
+            datos = _analizar(universo, serie_5y, indice_5y, umb, nucleo, rotacion,
+                              sin_fundamentales)
             _RESULTADO["datos"] = datos
             _RESULTADO["ts"] = time.time()
             with _LOCK:
