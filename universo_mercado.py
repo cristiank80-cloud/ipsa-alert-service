@@ -261,11 +261,28 @@ def ampliar_universo(base, excluir=()):
                           f"({len(base_set)} simbolos).")
 
         mercado = _cache["simbolos"] or set()
-        completo = sorted((base_set | mercado) - set(excluir))
+        # EL ORDEN IMPORTA, Y MUCHO. explorar.py baja los historiales EN ESTE
+        # ORDEN y corta cuando se le acaba el presupuesto de tiempo. Con la
+        # lista ordenada alfabeticamente sobre 5.200 simbolos, la primera
+        # corrida real solo alcanzo a barrer las que empiezan con "A" -- las
+        # unicas candidatas que salieron fueron AFRM, AMCR, ABCL, AEHR, ADPT y
+        # AMH, y el S&P 500 entero quedo sin revisar. El resultado no era
+        # "no hay candidatas": era "no se miro donde estaban".
+        #
+        # Por eso el NUCLEO (S&P 500 + Nasdaq-100 + la grilla) va SIEMPRE
+        # primero: son las que Cristian de verdad va a comprar y caben de
+        # sobra dentro del presupuesto. El resto del mercado va detras, y se
+        # va cubriendo de a poco corrida tras corrida gracias a la cache de
+        # 12 h (lo ya bajado no se vuelve a pedir, asi que cada corrida avanza
+        # sobre lo que falta en vez de repetir el principio del abecedario).
+        nucleo = sorted(base_set)
+        resto = sorted((mercado - base_set) - set(excluir))
+        completo = nucleo + resto
         info = {
             "total": len(completo),
+            "nucleo": len(nucleo),
             "solo_base": len(base_set),
-            "del_mercado_completo": len(mercado - base_set),
+            "del_mercado_completo": len(resto),
             "fuente_mercado_completo": "NASDAQ Trader (nasdaqlisted.txt + "
                                         "otherlisted.txt)" if mercado else None,
             "descargado": _cache["cuando"].isoformat() if _cache["cuando"] else None,

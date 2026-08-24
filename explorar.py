@@ -541,7 +541,7 @@ def _metricas_de_serie(puntos):
     }
 
 
-def embudo(metricas, umbrales):
+def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"):
     """
     Aplica los 7 filtros y devuelve (pasos, sobrevivientes_por_etapa).
 
@@ -557,7 +557,7 @@ def embudo(metricas, umbrales):
 
     pasos = []
     vivos = dict(metricas)
-    pasos.append({"filtro": "Universo de partida", "detalle": "S&P 500 + Nasdaq-100 + tu grilla",
+    pasos.append({"filtro": "Universo de partida", "detalle": detalle_inicio,
                   "quedan": len(vivos), "grupo": "inicio"})
 
     vivos = {t: m for t, m in vivos.items() if ok(m.get("precio"), umbrales["precio"])}
@@ -669,7 +669,7 @@ def resultado():
     return _RESULTADO["datos"]
 
 
-def _analizar(universo, serie_5y, indice_5y, umbrales):
+def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None):
     """
     El pipeline completo. `serie_5y(ticker)` y `indice_5y()` los inyecta
     server.py para reusar SU cache de 24h -- este modulo no la duplica.
@@ -752,8 +752,21 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
         print(f"[explorar] Presupuesto de tiempo agotado: {len(saltadas)} "
               f"sin revisar de {len(universo)}. Vuelve a correr el analisis y "
               f"seguira desde donde quedo -- lo bajado queda en cache 12h.")
+    # CUANTO DEL NUCLEO SE ALCANZO A REVISAR. Es la unica cifra que dice si el
+    # resultado se puede comparar con corridas anteriores (y con TradingView
+    # restringido a los indices): si el nucleo quedo entero, "0 candidatas"
+    # significa que de verdad no hubo; si quedo a medias, no significa nada.
+    nucleo_set = set(nucleo or ())
+    nucleo_revisado = len([t for t in metricas if t in nucleo_set]) if nucleo_set else None
+    nucleo_completo = bool(nucleo_set) and nucleo_revisado >= len(nucleo_set)
+
     _set(f"{len(metricas)} con historial suficiente. Aplicando filtros de precio y tendencia…", 55)
-    pasos_a, vivos = embudo(metricas, umbrales)
+    detalle_inicio = (
+        f"{len(metricas)} revisadas de {len(universo)} del universo"
+        + (f" · el núcleo ({len(nucleo_set)}) quedó "
+           + ("entero" if nucleo_completo else f"en {nucleo_revisado}") if nucleo_set else "")
+    )
+    pasos_a, vivos = embudo(metricas, umbrales, detalle_inicio)
 
     # ---- Paso 2b · capitalizacion y crecimiento ---------------------------
     # OJO: los fundamentales se piden SOLO para las que pasaron precio,
@@ -1002,6 +1015,12 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             "veniaEnCache": len(en_cache),
             "sinDatoFundamental": sin_dato,
             "tickers": tras_embudo,
+            # El nucleo = S&P 500 + Nasdaq-100 + la grilla. Ver el comentario
+            # de nucleo_revisado: sin esto no se puede saber si un "0
+            # candidatas" es un resultado o un barrido incompleto.
+            "nucleoTotal": len(nucleo_set) or None,
+            "nucleoRevisado": nucleo_revisado,
+            "nucleoCompleto": nucleo_completo if nucleo_set else None,
         },
         # De donde salieron (o no salieron) capitalizacion y crecimiento.
         # Esto es lo que convierte "0 candidatas" en una respuesta que se
@@ -1039,6 +1058,17 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
             f"embudo se cortó ahí y el resultado NO es comparable con TradingView. "
             f"No es que no hubiera candidatas: es que no se pudieron evaluar."
         ] if diag_fund.get("pedidos") and diag_fund.get("conCapitalizacion") == 0 else []) + ([
+            # Va antes que el aviso general de cobertura porque es mas grave:
+            # con el nucleo a medias, el resultado no es comparable ni con la
+            # corrida de ayer ni con TradingView.
+            f"ATENCIÓN: el barrido se cortó ANTES de terminar el núcleo del "
+            f"universo (S&P 500 + Nasdaq-100 + tu grilla): se revisaron "
+            f"{nucleo_revisado} de {len(nucleo_set)}. Las candidatas de esta "
+            f"corrida salen solo de esa parte, así que un número bajo acá NO "
+            f"quiere decir que el mercado no tenga nada. Vuelve a ejecutar: lo "
+            f"ya bajado queda en caché 12 h y la próxima corrida sigue desde "
+            f"donde quedó."
+        ] if nucleo_set and not nucleo_completo else []) + ([
             f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
             f"del universo ({round(len(metricas)/max(1,len(universo))*100)} %). "
             f"Quedaron {len(saltadas)} sin revisar porque se acabó el presupuesto "
@@ -1062,7 +1092,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales):
     }
 
 
-def iniciar(universo, serie_5y, indice_5y, umbrales=None):
+def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None):
     """
     Arranca el analisis en un hilo. Devuelve (arrancó, motivo).
 
@@ -1086,7 +1116,7 @@ def iniciar(universo, serie_5y, indice_5y, umbrales=None):
 
     def _correr():
         try:
-            datos = _analizar(universo, serie_5y, indice_5y, umb)
+            datos = _analizar(universo, serie_5y, indice_5y, umb, nucleo)
             _RESULTADO["datos"] = datos
             _RESULTADO["ts"] = time.time()
             with _LOCK:

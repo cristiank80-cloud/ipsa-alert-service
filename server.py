@@ -1863,9 +1863,13 @@ def explorar_run():
     umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento")}
     universo, info_universo = universo_mercado.ampliar_universo(
         UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR)
+    # El nucleo va aparte para que explorar.py pueda decir si alcanzo a
+    # revisarlo entero -- sin ese dato, un "0 candidatas" no se distingue de
+    # un barrido que se corto antes de llegar a las acciones que importan.
     arranco, motivo = explorar.iniciar(
         universo, lambda t: _serie5y_ticker(t, True),
-        lambda: _indice5y("usa"), umbrales)
+        lambda: _indice5y("usa"), umbrales,
+        nucleo=set(UNIVERSO_ANALISIS) - set(ETFS_NO_ANALIZAR))
 
     if not arranco:
         return jsonify({"arrancado": False, "motivo": motivo,
