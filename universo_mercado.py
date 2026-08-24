@@ -277,6 +277,59 @@ def ampliar_universo(base, excluir=()):
         return completo, info
 
 
+def simbolos_en_cache():
+    """
+    Los simbolos del mercado completo que YA estan descargados, como set.
+    Vacio si todavia no se pudo bajar. NO sale a la red -- se puede llamar
+    desde cualquier peticion sin costo.
+
+    La usa server.py para validar la watchlist: una candidata que Explorar
+    encontro en el mercado ampliado tiene que poder mandarse a "A seguir",
+    y sin esto quedaba fuera por no estar en el universo base.
+    """
+    with _lock:
+        return set(_cache["simbolos"] or ())
+
+
+def precalentar():
+    """
+    Deja la lista lista antes de que alguien la necesite. Pensada para
+    llamarse UNA vez al arrancar el servidor, en segundo plano.
+
+    POR QUE IMPORTA: la cache vive en memoria y se pierde en cada reinicio
+    (que en el plan gratuito de Render pasa solo, por inactividad). Sin esto,
+    la ventana entre el reinicio y el primer analisis dejaba la watchlist
+    validandose solo contra el universo base -- y el frontend reenvia su
+    watchlist cada vez que se abre la app, asi que una candidata del mercado
+    ampliado se habria perdido en silencio justo ahi.
+
+    No lanza nunca: si falla, `ampliar_universo` lo reintenta despues y el
+    analisis igual corre con el universo base.
+    """
+    try:
+        with _lock:
+            if _cache_vigente():
+                return False
+        simbolos, info = _construir()
+        with _lock:
+            if simbolos is not None:
+                _cache["simbolos"] = simbolos
+                _cache["cuando"] = datetime.now(timezone.utc)
+                _cache["crudo_nasdaq"] = info["crudo_nasdaq"]
+                _cache["crudo_other"] = info["crudo_other"]
+                _cache["descartados_no_accion"] = info["descartados_no_accion"]
+                _cache["motivo_error"] = None
+                print(f"[universo_mercado] Mercado completo listo: "
+                      f"{len(simbolos)} simbolos utiles.")
+                return True
+            _cache["motivo_error"] = info["motivo_error"]
+            print(f"[universo_mercado] No se pudo precalentar: {info['motivo_error']}")
+            return False
+    except Exception as e:
+        print(f"[universo_mercado] Fallo el precalentado: {type(e).__name__}: {e}")
+        return False
+
+
 def estado_cache():
     """Como esta la cache AHORA MISMO, sin descargar nada -- para
     /universo-diag. Igual que simbolos_en_cuarentena() en data_source.py:

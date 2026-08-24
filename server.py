@@ -467,8 +467,24 @@ def _leer_watchlist():
     return _limpiar_watchlist(crudo)
 
 
+def _universo_conocido():
+    """
+    Contra que se valida un simbolo que llega de afuera: el universo base MAS
+    el mercado completo, si ya se descargo.
+
+    Antes esto era solo UNIVERSO_ANALISIS. Al ampliar el embudo a todo el
+    mercado de EE.UU. eso paso a ser un agujero real: Explorar podia mostrarte
+    una candidata que no esta en el S&P 500 ni en el Nasdaq-100, y al tocar
+    "+ A seguir" el servidor la descartaba en silencio por no conocerla.
+
+    NO sale a la red. Si el mercado completo todavia no se bajo, esto es
+    exactamente lo que era antes.
+    """
+    return set(UNIVERSO_ANALISIS) | universo_mercado.simbolos_en_cache()
+
+
 def _limpiar_watchlist(simbolos):
-    universo = set(UNIVERSO_ANALISIS)
+    universo = _universo_conocido()
     en_grilla = set(TICKERS_USA)
     limpia, vistos = [], set()
     for s in simbolos:
@@ -641,7 +657,7 @@ def guardar_watchlist():
         return jsonify({"status": "error", "message": "falta 'tickers' (lista)"}), 400
 
     aceptados = _limpiar_watchlist(pedidos)
-    universo, en_grilla = set(UNIVERSO_ANALISIS), set(TICKERS_USA)
+    universo, en_grilla = _universo_conocido(), set(TICKERS_USA)
     rechazados = {}
     for s in pedidos:
         if not isinstance(s, str):
@@ -1995,7 +2011,7 @@ def diagnostico_lote():
     if len(pedidos) > 40:
         return jsonify({"error": f"maximo 40 por llamada, pediste {len(pedidos)}"}), 400
 
-    conocidos = set(TICKERS) | set(TICKERS_USA) | set(UNIVERSO_ANALISIS)
+    conocidos = set(TICKERS) | set(TICKERS_USA) | _universo_conocido()
     salida, desconocidos = {}, []
     for t in pedidos:
         if t not in conocidos:
@@ -2016,6 +2032,24 @@ def diagnostico_lote():
 @app.route("/health")
 def health():
     return jsonify({"status": "alive"})
+
+
+# ==========================================================================
+# ARRANQUE -- dejar lista la lista del mercado completo
+# ==========================================================================
+# Se hace en un hilo aparte y al importar el modulo (no dentro de
+# `if __name__ == "__main__"`), porque bajo gunicorn ese bloque NO corre.
+#
+# POR QUE AL ARRANCAR Y NO CUANDO SE NECESITA: la cache del mercado completo
+# vive en memoria y se pierde en cada reinicio -- que en el plan gratuito de
+# Render pasa solo, por inactividad. La watchlist se valida contra ella, y el
+# frontend reenvia su watchlist cada vez que se abre la app. Sin precalentar,
+# esa ventana entre el reinicio y el primer analisis descartaba en silencio
+# las candidatas que no estan en el S&P 500 ni en el Nasdaq-100.
+#
+# Son dos archivos de texto, una sola vez cada 24 h, y no bloquea el arranque:
+# si falla, el analisis igual corre con el universo base.
+_en_segundo_plano("universo-mercado", universo_mercado.precalentar)
 
 
 if __name__ == "__main__":
