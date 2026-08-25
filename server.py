@@ -785,6 +785,113 @@ def quotes():
     })
 
 
+# Ficha de UNA accion cualquiera, pedida en el momento. Vive poco: es una
+# consulta, no una suscripcion. 10 minutos alcanza para mirar la ficha, tocar
+# los periodos del grafico y volver, sin repetir peticiones.
+_FICHA_TTL = 10 * 60
+_ficha_cache = {}          # ticker -> {"data": {...}, "ts": epoch}
+_ficha_lock = threading.Lock()
+
+
+@app.route("/accion", methods=["GET"])
+def accion():
+    """
+    Precio y estadisticas de UNA accion, aunque no este en la grilla.
+
+    EL AGUJERO QUE TAPA
+    ===================
+    Explorar barre las ~5.254 acciones del mercado, pero la grilla que recibe
+    precio cada 30 minutos son 173. Cuando el embudo encontraba una candidata
+    fuera de esas 173 -- TECK, por ejemplo -- tocarla no abria nada: la app
+    decia "no esta en tu grilla" y te mandaba a agregarla a "A seguir" y
+    esperar al proximo ciclo. Para MIRAR una candidata antes de decidir si te
+    interesa, eso es al reves: te obliga a comprometerte para poder mirar.
+    Ahora se le piden los datos en el momento.
+
+    POR QUE NO SE AMPLIA LA GRILLA EN VEZ DE ESTO
+    ==============================================
+    La grilla se refresca ENTERA cada 30 minutos, para siempre. Meter ahi el
+    mercado completo serian 5.254 historiales por ciclo (get_stats pide uno
+    por simbolo) -- es exactamente el problema que tumbaba el servidor cuando
+    EE.UU. crecio de 7 a 107 instrumentos. Esto, en cambio, cuesta DOS
+    peticiones y solo cuando tocas una accion.
+    """
+    ticker = (request.args.get("ticker") or "").upper().strip()
+    if not ticker:
+        return jsonify({"error": "falta el parametro ticker"}), 400
+    if ticker not in _universo_conocido():
+        return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+
+    ahora = time.time()
+    with _ficha_lock:
+        c = _ficha_cache.get(ticker)
+        if c and (ahora - c["ts"]) <= _FICHA_TTL:
+            return jsonify(dict(c["data"], origen="cache"))
+
+    # Dos peticiones: el precio en vivo y la serie de un año (que trae de una
+    # vez medias, RSI, retornos y volatilidad). con_indice=False porque el
+    # S&P 500 ya viene en la tanda de la grilla y aca no se usa.
+    try:
+        quotes, _ = get_market_data([ticker], suffix="")
+        stats, _idx, series = get_stats([ticker], suffix="", con_indice=False)
+    except Exception as e:
+        return jsonify({"error": f"no se pudo consultar a Yahoo: "
+                                 f"{type(e).__name__}"}), 502
+
+    q = (quotes or {}).get(ticker)
+    if not q or not isinstance(q.get("price"), (int, float)):
+        # Se distingue a proposito de un 400: el simbolo es valido, pero hoy
+        # Yahoo no lo entrega. Volver a intentar puede funcionar.
+        return jsonify({"error": f"Yahoo no entregó precio para {ticker}. "
+                                 f"Puede ser un papel retirado, o un problema "
+                                 f"momentáneo — intenta de nuevo en un rato.",
+                        "ticker": ticker}), 404
+
+    s = (stats or {}).get(ticker, {})
+    volumen = q.get("volume")
+    datos = {
+        "ticker": ticker,
+        "quote": {
+            "price": q["price"],
+            "avg": s.get("avg90"),
+            "marketTime": q.get("marketTime"),
+            "staleSeconds": q.get("staleSeconds"),
+            "fetchedAt": q.get("fetchedAt"),
+            "previousClose": q.get("previousClose"),
+            "dayHigh": q.get("dayHigh"),
+            "dayLow": q.get("dayLow"),
+            "volume": volumen,
+            "montoTransado": (volumen * q["price"]) if volumen else None,
+            "ret3m": s.get("ret3m"),
+            "ret1y": s.get("ret1y"),
+            "rsi14": s.get("rsi14"),
+            "sma20": s.get("sma20"),
+            "sma50": s.get("sma50"),
+            "sma200": s.get("sma200"),
+            "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
+            "volDiaria": s.get("volDiaria"),
+            "montoMedioDiario30d": s.get("montoMedioDiario30d"),
+            "bid": None, "ask": None, "bidSize": None, "askSize": None,
+            "puntasDisponibles": False,
+            # No es de la grilla ni de la watchlist: es una consulta suelta.
+            "esFichaSuelta": True,
+        },
+        "currency": q.get("currency") or "USD",
+        "enGrilla": ticker in TICKERS_USA,
+    }
+
+    # La serie que ya vino se deja en la cache de /history: asi tocar los
+    # periodos del grafico no vuelve a pedirle nada a Yahoo.
+    serie = (series or {}).get(ticker)
+    if serie:
+        with _ficha_lock:
+            _ficha_cache[ticker] = {"data": datos, "ts": ahora, "serie": serie}
+    else:
+        with _ficha_lock:
+            _ficha_cache[ticker] = {"data": datos, "ts": ahora}
+    return jsonify(dict(datos, origen="yahoo"))
+
+
 @app.route("/quotes-usa", methods=["GET"])
 def quotes_usa():
     """
@@ -1006,7 +1113,13 @@ def history():
     period = request.args.get("period", "3mo").lower()
     es_usa = ticker in TICKERS_USA
     es_indice_usa = ticker in INDICE_USA_ALIASES
-    if (ticker not in TICKERS and not es_usa
+    # Una accion abierta bajo demanda (ver /accion) NO esta en TICKERS_USA y
+    # antes se rechazaba aca con un 400 -- o sea, se podia abrir la ficha pero
+    # el grafico salia vacio. Se valida contra el universo conocido, que es el
+    # mismo criterio que ya usan la watchlist y /diagnostico-lote.
+    es_suelta = (not es_usa and not es_indice_usa
+                 and ticker not in TICKERS and ticker in _universo_conocido())
+    if (ticker not in TICKERS and not es_usa and not es_suelta
             and ticker not in ("IPSA", "^IPSA") and not es_indice_usa):
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
     if period not in VALID_PERIODS:
@@ -1026,8 +1139,20 @@ def history():
     # volver a pedirsela a Yahoo. Menos peticiones = menos rate limiting.
     # Las series de ambiente 2 viven en una cache separada (ver
     # _refrescar_stats_usa) porque no comparten ciclo con las de Chile.
-    st = _refrescar_stats_usa() if (es_usa or es_indice_usa) else _refrescar_stats()
     dias = {"1mo": 21, "3mo": 63, "6mo": 126, "ytd": None, "1y": 252}.get(period)
+    if es_suelta:
+        # /accion ya bajo la serie de un año al abrir la ficha: recortarla acá
+        # es gratis. Sin esto, tocar cada botón de período serían peticiones
+        # nuevas a Yahoo por una acción que ni siquiera estás siguiendo.
+        with _ficha_lock:
+            c = _ficha_cache.get(ticker)
+            guardada = c.get("serie") if c else None
+        if guardada and dias and len(guardada) >= dias:
+            return jsonify({"ticker": ticker, "period": period,
+                            "points": guardada[-dias:], "origen": "cache"})
+        st = {}
+    else:
+        st = _refrescar_stats_usa() if (es_usa or es_indice_usa) else _refrescar_stats()
     serie = (st.get("series") or {}).get(ticker)
     if serie and dias and len(serie) >= dias:
         return jsonify({"ticker": ticker, "period": period,
@@ -1041,7 +1166,9 @@ def history():
         # (^IPSA) internamente; para el S&P 500 se pasa el simbolo real
         # (^GSPC) directo, porque data_source.py no conoce el alias "SP500".
         simbolo_pedido = INDEX_SYMBOL_USA if es_indice_usa else ticker
-        suf = "" if (es_usa or es_indice_usa) else None
+        # es_suelta tambien va SIN sufijo: son simbolos de EE.UU. Sin esto se
+        # les pegaria ".SN" (Bolsa de Santiago) y Yahoo no devolveria nada.
+        suf = "" if (es_usa or es_indice_usa or es_suelta) else None
         _history_cache[key] = {"data": get_price_history(simbolo_pedido, period, suffix=suf), "ts": ahora}
     return jsonify({"ticker": ticker, "period": period,
                     "points": _history_cache[key]["data"], "origen": "yahoo"})
