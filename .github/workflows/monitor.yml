@@ -30,6 +30,15 @@ on:
     # servidor decide adentro la hora exacta y evita reenvios el mismo dia.
     # Mismo motivo que arriba: no depende del cambio de horario de Chile.
     - cron: '*/10 19-20 * * 1-5'
+    # Apagar/encender el servicio de Render el fin de semana. La Bolsa esta
+    # cerrada y NINGUN cron de arriba corre sabado ni domingo (todos terminan
+    # en "* * 1-5"), asi que suspender no hace perder ni un cruce ni un
+    # digesto. Un servicio suspendido NO consume horas gratis de Render, y
+    # con esto los 5 dias habiles quedan encendidos 24/7: 22 x 24 = 528 h,
+    # comodamente bajo el tope de 750 h/mes del plan gratuito.
+    - cron: '0 23 * * 5'   # viernes 23:00 UTC = 19:00 Chile (20:00 en verano)
+    - cron: '0 11 * * 1'   # lunes   11:00 UTC = 07:00 Chile (08:00 en verano)
+
   workflow_dispatch: {}   # permite ejecutarlo a mano desde GitHub para probar
 
 jobs:
@@ -128,3 +137,40 @@ jobs:
           git add "$ARCHIVO"
           git commit -m "IPSA $FECHA: $VALOR (automatico via monitor.yml)"
           git push
+
+  # Estos dos jobs NO llevan "|| github.event_name == 'workflow_dispatch'" a
+  # proposito: si lo llevaran, probar el workflow a mano desde GitHub
+  # suspenderia el servicio sin querer.
+  suspender-fin-de-semana:
+    if: github.event.schedule == '0 23 * * 5'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Suspender el servicio en Render
+        run: |
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          echo ""
+          if [ "$codigo" -ge 300 ]; then exit 1; fi
+
+  reanudar-lunes:
+    if: github.event.schedule == '0 11 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reanudar el servicio en Render
+        run: |
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          echo ""
+          # 400 = "no estaba suspendido" (por ejemplo si lo reanudaste a mano
+          # antes). Eso NO es un fallo: el servicio esta arriba igual.
+          if [ "$codigo" = "400" ]; then
+            echo "El servicio ya estaba activo; nada que hacer."
+            exit 0
+          fi
+          if [ "$codigo" -ge 300 ]; then exit 1; fi
