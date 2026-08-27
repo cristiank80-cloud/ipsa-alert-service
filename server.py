@@ -52,6 +52,10 @@ from data_source import (get_market_data, get_stats, get_price_history,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
 from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR, SIN_FUNDAMENTALES
+
+# Numeros en formato chileno (miles con punto, decimales con coma)
+# para TODO lo que lee una persona -- ver el docstring de formato.py.
+import formato
 import fuente_bolsa
 import fuente_df
 import ipsa_historico
@@ -1490,8 +1494,8 @@ def _fmt_monto_digesto(valor, mercado):
     """CLP sin decimales, USD con 2 -- mismo criterio que notify._fmt_monto,
     copiado aca en vez de importado porque es privado de ese modulo."""
     if mercado == "USD":
-        return f"US$ {valor:,.2f}"
-    return f"CL$ {valor:,.0f}"
+        return f"US$ {formato.num(valor, 2)}"
+    return f"CL$ {formato.num(valor, 0)}"
 
 
 def _texto_digesto(alertas):
@@ -1529,7 +1533,7 @@ def _texto_digesto(alertas):
         lineas.append("PRECIOS OBJETIVO ALCANZADOS")
         for a in objetivos:
             verbo = "subió a" if a["direccion"] == "sube" else "bajó a"
-            pct_txt = (f"{'+' if a['pct'] is not None and a['pct'] >= 0 else ''}{a['pct']:.1f}%"
+            pct_txt = (f"{formato.num(a['pct'], 1, signo=True)}%"
                        if a["pct"] is not None else "s/d")
             lineas.append(f"  {a['ticker']} {verbo} {_fmt_monto_digesto(a['precio'], a['mercado'])} "
                           f"(objetivo {_fmt_monto_digesto(a['objetivo'], a['mercado'])}, {pct_txt})")
@@ -1681,7 +1685,7 @@ def resumen_diario():
     lineas = [f"Resumen IPSA · {datetime.now().strftime('%d/%m/%Y')}", ""]
     if index:
         edad = index.get("staleSeconds")
-        lineas.append(f"IPSA: {index['value']:,.0f}"
+        lineas.append(f"IPSA: {formato.num(index['value'], 0)}"
                       + (f" (dato de hace {edad//60} min)" if edad else ""))
     else:
         lineas.append("IPSA: NO DISPONIBLE hoy (Diario Financiero no respondio).")
@@ -1693,8 +1697,9 @@ def resumen_diario():
         if not items:
             out.append("  (ninguna cumple los criterios hoy)")
         for e in items[:5]:
-            out.append(f"  {e['ticker']}: {e['precio']:,.0f} · puntaje {e['puntaje']:+.0f} "
-                       f"· z {e['zscore']:+.1f} · RSI {e['rsi14']}")
+            out.append(f"  {e['ticker']}: {formato.num(e['precio'], 0)} "
+                       f"· puntaje {formato.num(e['puntaje'], 0, signo=True)} "
+                       f"· z {formato.num(e['zscore'], 1, signo=True)} · RSI {e['rsi14']}")
             for b in e.get("banderas", []):
                 out.append(f"      ! {b.split('—')[0].strip()}")
         out.append("")

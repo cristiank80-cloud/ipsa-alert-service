@@ -44,6 +44,10 @@ sean explicitas.
 import os
 import time
 
+# Numeros en formato chileno (miles con punto, decimales con coma)
+# para TODO lo que lee una persona -- ver el docstring de formato.py.
+import formato
+
 # --------------------------------------------------------------------------
 # Umbrales — cambialos aqui, no repartidos por el codigo
 # --------------------------------------------------------------------------
@@ -185,22 +189,22 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP", reporte=None
         dist_pct = _pct(precio / stats["avg90"] - 1) if stats.get("avg90") else None
         if z <= Z_COMPRA_FUERTE:
             razones.append(
-                f"Esta {abs(z):.1f} desviaciones BAJO su {ancla} "
-                f"({dist_pct}% respecto del promedio de 90 dias). Para esta "
+                f"Esta {formato.num(abs(z), 1)} desviaciones BAJO su {ancla} "
+                f"({formato.num(dist_pct, 1)}% respecto del promedio de 90 dias). Para esta "
                 f"accion en particular, eso es un nivel poco frecuente.")
         elif z <= Z_COMPRA_ATENCION:
             razones.append(
-                f"Esta {abs(z):.1f} desviaciones bajo su {ancla} "
-                f"({dist_pct}% respecto del promedio de 90 dias).")
+                f"Esta {formato.num(abs(z), 1)} desviaciones bajo su {ancla} "
+                f"({formato.num(dist_pct, 1)}% respecto del promedio de 90 dias).")
         elif z >= Z_VENTA_FUERTE:
             razones.append(
-                f"Esta {z:.1f} desviaciones SOBRE su {ancla} "
-                f"({dist_pct}% respecto del promedio de 90 dias). "
+                f"Esta {formato.num(z, 1)} desviaciones SOBRE su {ancla} "
+                f"({formato.num(dist_pct, 1)}% respecto del promedio de 90 dias). "
                 f"Historicamente se ha estirado poco mas que esto.")
         elif z >= Z_VENTA_ATENCION:
             razones.append(
-                f"Esta {z:.1f} desviaciones sobre su {ancla} "
-                f"({dist_pct}% respecto del promedio de 90 dias).")
+                f"Esta {formato.num(z, 1)} desviaciones sobre su {ancla} "
+                f"({formato.num(dist_pct, 1)}% respecto del promedio de 90 dias).")
         else:
             razones.append(
                 f"En linea con su {ancla} ({dist_pct}% respecto del promedio "
@@ -214,10 +218,10 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP", reporte=None
         if pend is not None and por_regresion:
             if pend >= 0.05:
                 razones.append(f"Su linea de tendencia de 90 dias sube "
-                               f"{pend:.2f}% por dia.")
+                               f"{formato.num(pend, 2)}% por dia.")
             elif pend <= -0.05:
                 razones.append(f"Su linea de tendencia de 90 dias baja "
-                               f"{abs(pend):.2f}% por dia.")
+                               f"{formato.num(abs(pend), 2)}% por dia.")
             else:
                 razones.append("Su linea de tendencia de 90 dias esta "
                                "practicamente plana.")
@@ -343,12 +347,12 @@ def evaluar(ticker, precio, stats, stats_indice=None, moneda="CLP", reporte=None
         if monto < liquidez_minima:
             puntaje *= 0.5  # la senal existe pero no se puede ejecutar limpio
             banderas.append(
-                f"POCA LIQUIDEZ — transa en promedio ${monto/1e6:,.1f} millones "
+                f"POCA LIQUIDEZ — transa en promedio ${formato.num(monto/1e6, 1)} millones "
                 f"{sufijo_moneda} al dia. Entrar o salir puede moverte el precio "
                 f"en contra, y el spread se come buena parte de la diferencia. "
                 f"El puntaje se redujo a la mitad por esto.")
         else:
-            razones.append(f"Liquidez razonable: ~${monto/1e6:,.1f} millones "
+            razones.append(f"Liquidez razonable: ~${formato.num(monto/1e6, 1)} millones "
                            f"{sufijo_moneda} transados al dia (promedio 30 dias).")
     else:
         banderas.append("Sin dato de volumen: no se pudo verificar liquidez.")
@@ -466,9 +470,9 @@ def describe(ev):
     """Una linea legible para el correo o el push."""
     if not ev or ev.get("puntaje") is None:
         return "Sin datos suficientes para evaluar."
-    partes = [f"puntaje {ev['puntaje']:+.0f}"]
+    partes = [f"puntaje {formato.num(ev['puntaje'], 0, signo=True)}"]
     if ev.get("zscore") is not None:
-        partes.append(f"z {ev['zscore']:+.1f}")
+        partes.append(f"z {formato.num(ev['zscore'], 1, signo=True)}")
     if ev.get("rsi14") is not None:
         partes.append(f"RSI {ev['rsi14']}")
     linea = " · ".join(partes)

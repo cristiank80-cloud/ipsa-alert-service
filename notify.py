@@ -32,6 +32,10 @@ import base64
 import binascii
 import requests
 
+# Numeros en formato chileno (miles con punto, decimales con coma)
+# para TODO lo que lee una persona -- ver el docstring de formato.py.
+import formato
+
 from pywebpush import webpush, WebPushException
 from py_vapid import Vapid01
 from cryptography.hazmat.primitives import serialization
@@ -80,8 +84,8 @@ def send_alert(ticker, direccion, precio, avg, cuerpo=None, mercado="CLP"):
     dist_txt, cuerpo_precio = "", f"{ticker} está en {_fmt_monto(precio, mercado)}"
     if avg:
         dist = abs((precio / avg - 1) * 100)
-        dist_txt = f" — {dist:.1f}% {prep} su promedio"
-        cuerpo_precio += f", un {dist:.1f}% {prep} su promedio histórico de 90 días ({_fmt_monto(avg, mercado)})"
+        dist_txt = f" — {formato.num(dist, 1)}% {prep} su promedio"
+        cuerpo_precio += f", un {formato.num(dist, 1)}% {prep} su promedio histórico de 90 días ({_fmt_monto(avg, mercado)})"
     cuerpo_precio += "."
 
     subject = f"{emoji} {ticker}: {palabra}{dist_txt}"
@@ -422,7 +426,7 @@ def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None, merc
     body = _fmt_monto(precio, mercado)
     if avg:
         dist = abs((precio / avg - 1) * 100)
-        body += f" ({dist:.1f}% {prep} su promedio de {_fmt_monto(avg, mercado)})"
+        body += f" ({formato.num(dist, 1)}% {prep} su promedio de {_fmt_monto(avg, mercado)})"
     if indicadores_texto:
         body += f" · {indicadores_texto}"
 
@@ -437,8 +441,8 @@ def send_push_alert(ticker, direccion, precio, avg, indicadores_texto=None, merc
 def _fmt_monto(valor, mercado):
     """CLP sin decimales (igual que el resto de la app), USD con 2 decimales."""
     if mercado == "USD":
-        return f"US$ {valor:,.2f}"
-    return f"CL$ {valor:,.0f}"
+        return f"US$ {formato.num(valor, 2)}"
+    return f"CL$ {formato.num(valor, 0)}"
 
 
 def _texto_objetivo(ticker, direccion, precio, objetivo, monto, pct, mercado):
@@ -455,7 +459,7 @@ def _texto_objetivo(ticker, direccion, precio, objetivo, monto, pct, mercado):
     else:
         emoji, palabra, verbo = "🔔", "alcanzó tu precio de aviso", "bajó a"
 
-    pct_txt = f"{'+' if pct is not None and pct >= 0 else ''}{pct:.1f}%" if pct is not None else "s/d"
+    pct_txt = f"{formato.num(pct, 1, signo=True)}%" if pct is not None else "s/d"
     titulo = f"{emoji} {ticker} {palabra}"
     cuerpo = (
         f"{ticker} {verbo} {_fmt_monto(precio, mercado)}. "

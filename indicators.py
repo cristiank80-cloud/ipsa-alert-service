@@ -9,6 +9,10 @@ alerta de "bajo el promedio". Interpretación estándar de RSI (no es
 garantía de nada): <30 sugiere sobreventa, >70 sugiere sobrecompra.
 """
 
+# Numeros en formato chileno (miles con punto, decimales con coma)
+# para TODO lo que lee una persona -- ver el docstring de formato.py.
+import formato
+
 
 def sma(prices, window):
     """Media móvil simple de los últimos 'window' precios, o None si
@@ -66,9 +70,9 @@ def describe(indicators):
             lectura = " (sobrecomprado)"
         partes.append(f"RSI(14): {rsi_val}{lectura}")
     if indicators.get("sma20") is not None:
-        partes.append(f"SMA(20): {indicators['sma20']:,.0f}")
+        partes.append(f"SMA(20): {formato.num(indicators['sma20'], 0)}")
     if indicators.get("sma50") is not None:
-        partes.append(f"SMA(50): {indicators['sma50']:,.0f}")
+        partes.append(f"SMA(50): {formato.num(indicators['sma50'], 0)}")
     if not partes:
         return "Aún no hay suficiente historial para calcular indicadores técnicos."
     return " · ".join(partes)
