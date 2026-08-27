@@ -65,6 +65,9 @@ import universo_mercado
 app = Flask(__name__)
 CORS(app)
 
+# Sincronización con GitHub
+from sync_github import verificar_credenciales
+
 SUBSCRIPTIONS_FILE = os.environ.get("SUBSCRIPTIONS_FILE", "push_subscriptions.json")
 # Precios objetivo por accion, definidos por el usuario en el modulo "Mi
 # Cartera" del frontend ("avisar si sube/baja a"). Mismo patron que
@@ -2190,6 +2193,95 @@ def health():
 # Son dos archivos de texto, una sola vez cada 24 h, y no bloquea el arranque:
 # si falla, el analisis igual corre con el universo base.
 _en_segundo_plano("universo-mercado", universo_mercado.precalentar)
+
+
+# ========================================================================
+# ENDPOINTS DE SINCRONIZACIÓN CON GITHUB
+# ========================================================================
+
+@app.route("/api/sync/download", methods=["GET"])
+def sync_download():
+    """
+    Descarga estado.json cifrado de GitHub.
+    El navegador descargará estado CIFRADO (el backend no puede leerlo).
+    """
+    try:
+        from sync_github import descargar_estado
+        resultado = descargar_estado()
+
+        if resultado:
+            return jsonify({
+                "success": True,
+                "content": resultado["content"],
+                "sha": resultado["sha"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "content": None,
+                "sha": None,
+                "message": "No hay archivo en el servidor aún",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route("/api/sync/upload", methods=["POST"])
+def sync_upload():
+    """
+    Sube estado.json cifrado a GitHub.
+    El navegador envía estado CIFRADO (el backend no puede leerlo).
+    """
+    try:
+        from sync_github import subir_estado
+        payload = request.get_json()
+
+        if not payload or "content" not in payload:
+            return jsonify({
+                "success": False,
+                "error": "Falta 'content' en el JSON",
+            }), 400
+
+        contenido_b64 = payload.get("content")
+        mensaje = payload.get("mensaje", "Sincronización automática")
+
+        resultado = subir_estado(contenido_b64, mensaje)
+
+        return jsonify({
+            "success": True,
+            "sha": resultado["sha"],
+            "message": resultado["message"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route("/api/sync/health", methods=["GET"])
+def sync_health():
+    """
+    Verifica que las credenciales de GitHub sean válidas.
+    """
+    try:
+        verificar_credenciales()
+        return jsonify({
+            "success": True,
+            "status": "Sincronización lista",
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
 
 
 if __name__ == "__main__":
