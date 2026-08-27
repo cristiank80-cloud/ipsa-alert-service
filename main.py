@@ -72,6 +72,53 @@ TICKERS = [
 # ETFs sugerido; ajustar segun preferencia real del usuario. Estos NO
 # llevan sufijo .SN al pedirlos a Yahoo (ver data_source.get_market_data
 # con suffix="").
+# ---------------------------------------------------------------------------
+# ETF DE SECTOR E INDUSTRIA -- una sola lista para toda la app
+# ---------------------------------------------------------------------------
+# Estas dos listas VIVIAN en explorar.py. Se movieron aca el 27-ago-2026,
+# cuando los 21 que faltaban entraron a la grilla.
+#
+# POR QUE SE MOVIERON
+# ===================
+# Si se quedaban alla, agregar un sector nuevo obligaba a editar TRES
+# listas: la de explorar.py, TICKERS_USA aca, y stocksUSA en el frontend.
+# Olvidar una no da error: da una tarjeta que nunca recibe precio, o un
+# simbolo que el servidor pide cada media hora y nadie ve. Ese desajuste
+# silencioso ya nos costo caro con la grilla y el frontend, y no habia
+# ninguna razon para repetirlo. Ahora explorar.py las IMPORTA de aca:
+#
+#     from main import ETFS_SECTOR, ETFS_INDUSTRIA
+#
+# Esa direccion es la unica que se puede: main.py no importa NADA (mira el
+# docstring de arriba, se dejo asi a proposito), asi que no hay import
+# circular posible. Al reves si lo habria, porque explorar.py arrastra
+# requests, data_source e indicador_fuerza_fase.
+#
+# EL FORMATO ES (nombre, ticker) y lo pide explorar.py: el nombre es la
+# etiqueta que se muestra en el paso 1, y el ticker es lo que se le manda a
+# Yahoo. Agregar un sector aca lo mete solo en los tres lugares: en el paso
+# 1 de Explorar, en la grilla (TICKERS_USA, mas abajo) y en la lista de
+# exclusion del embudo (ETFS_NO_ANALIZAR). Lo unico que sigue quedando a
+# mano es la entrada del frontend, que es otro archivo.
+_ETFS_SECTOR_CRUDO = [
+    ("Tecnología", "XLK"), ("Salud", "XLV"), ("Financiero", "XLF"),
+    ("Consumo discrecional", "XLY"), ("Consumo básico", "XLP"),
+    ("Energía", "XLE"), ("Industrial", "XLI"), ("Materiales", "XLB"),
+    ("Utilities", "XLU"), ("Inmobiliario", "XLRE"), ("Comunicaciones", "XLC"),
+]
+
+_ETFS_INDUSTRIA_CRUDO = [
+    ("Semiconductores", "SMH"), ("Software", "IGV"), ("Ciberseguridad", "CIBR"),
+    ("Biotecnología", "XBI"), ("Aeroespacial y defensa", "ITA"),
+    ("Banca regional", "KRE"), ("Retail", "XRT"), ("Petróleo y gas E&P", "XOP"),
+    ("Oro y mineras", "GDX"), ("Transporte", "IYT"),
+    ("Infraestructura", "PAVE"), ("Nuclear / uranio", "URA"),
+]
+
+# Los nombres publicos que importa explorar.py.
+ETFS_SECTOR = _ETFS_SECTOR_CRUDO
+ETFS_INDUSTRIA = _ETFS_INDUSTRIA_CRUDO
+
 TICKERS_USA = [
     # --- Nucleo de ETF (los 7 que ya estaban) ---
     "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD",
@@ -160,7 +207,83 @@ TICKERS_USA = [
     "ON", "ORLY", "PAYX", "PCAR", "PDD", "REGN", "ROP",
     "ROST", "SNPS", "TEAM", "TMUS", "TTD", "TTWO", "VRSK",
     "WDAY", "XEL", "ZS",
+
+    # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (27-ago-2026)
+    # -----------------------------------------------------------------------
+    # De la lista que paso venian diez nombres, pero DELL, LLY, MA y V ya
+    # estaban en la grilla desde antes -- no se repiten aca (repetirlos
+    # rompe el assert de mas abajo). Estas seis son las que faltaban de
+    # verdad.
+    #
+    # TRES SON ETF, y por eso ademas van a ETFS_NO_ANALIZAR mas abajo: se
+    # ven en la grilla, pero no entran al embudo de Explorar (un fondo no
+    # tiene capitalizacion ni crecimiento de utilidades que filtrar).
+    #
+    #   ARKK -- ARK Innovation. Fondo de gestion activa de tecnologia.
+    #   IYT  -- iShares U.S. Transportation. OJO: este simbolo YA se usaba
+    #           en explorar.py como el ETF de la industria "Transporte" del
+    #           paso 1. Que ahora tambien este en la grilla no lo rompe:
+    #           son dos usos distintos del mismo simbolo y el historial se
+    #           cachea igual, pero si algun dia se saca de aca, NO tocar el
+    #           de explorar.py.
+    #   URSP -- ProShares Ultra S&P 500 Equal Weight. Es APALANCADO 2x, la
+    #           unica excepcion a la regla de "nada apalancado" que dice el
+    #           comentario del bloque de las 100 grandes. Entra porque
+    #           Cristian lo pidio, pero amplifica al doble las subidas Y las
+    #           bajadas: la alerta de caida se le va a disparar mucho mas
+    #           seguido que al resto de la grilla, y no significa lo mismo.
+    #
+    # LAS OTRAS TRES SON ACCIONES NORMALES y si entran al embudo completo:
+    #
+    #   BUSE -- First Busey, banca regional (Nasdaq).
+    #   HNGE -- Hinge Health, salud digital (NYSE). Salio a bolsa en mayo de
+    #           2025, asi que recien ahora tiene el año de historial que
+    #           necesitan la fase de Weinstein y la fuerza relativa. Si el
+    #           embudo la deja en "sin dato", es por eso y no por un error.
+    #   UBS  -- UBS Group AG, banca global (la accion que cotiza en NYSE).
+    "ARKK", "BUSE", "HNGE", "IYT", "UBS", "URSP",
+
+    # -----------------------------------------------------------------------
+    # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
+    # -----------------------------------------------------------------------
+    # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
+    # estaban en la grilla desde antes, asi que aca van los 21 restantes.
+    # NO se escriben a mano: salen de ETFS_SECTOR y ETFS_INDUSTRIA, que
+    # ahora viven mas abajo en este mismo archivo. Ver el comentario de esas
+    # listas para saber por que se movieron desde explorar.py.
+    #
+    # POR QUE ENTRAN A LA GRILLA
+    # ==========================
+    # El metodo de Cristian empieza por el sector: primero se mira que
+    # sector esta fuerte y despues se busca la accion adentro. Hasta ahora
+    # esa lectura solo existia dentro de Explorar, que se corre a mano. En
+    # la grilla se ven todos los dias, al lado de las acciones.
+    #
+    # LO QUE ESTO CUESTA
+    # ==================
+    # La grilla pasa de 179 a 200 simbolos: ~12% mas peticiones a Yahoo en
+    # cada ciclo de 30 minutos. Sigue debajo del techo con el que se venia
+    # trabajando, pero es el limite: si hay que agregar mas cosas, primero
+    # sacar algo. El sintoma de haberse pasado son los 429 de Yahoo y las
+    # tarjetas que se quedan en "Calculando..." (ver
+    # data_source._MAX_WORKERS = 8, puesto justo por esto).
+    #
+    # Ninguno entra al embudo de Explorar: ETFS_NO_ANALIZAR los excluye a
+    # todos automaticamente, mas abajo.
 ]
+
+# Los 23 ETF del paso 1 se agregan aca y no escritos a mano arriba: los que
+# ya estaban en la lista literal (ITA e IYT) se saltan, y el orden en que
+# entran es el de ETFS_SECTOR/ETFS_INDUSTRIA, que es como se dibujan las
+# tarjetas -- tiene que calzar con stocksUSA del frontend.
+#
+# OJO: se filtra por "no estaba ya" y NO se deduplica la lista entera a
+# proposito. El assert de mas abajo tiene que seguir cachando un simbolo
+# repetido escrito a mano en el bloque literal; si aca se dedujera todo, ese
+# error se taparia solo y nunca lo veriamos.
+TICKERS_USA += [t for _, t in _ETFS_SECTOR_CRUDO + _ETFS_INDUSTRIA_CRUDO
+                if t not in TICKERS_USA]
 
 # Control de tamaño: si esta lista crece mucho mas, el ciclo de fondo
 # empieza a rozar el limite de 429 de Yahoo (data_source._MAX_WORKERS = 8
@@ -303,15 +426,23 @@ NASDAQ100 = [
 # Siguen en TICKERS_USA (la grilla): Cristian los tiene y quiere ver su
 # precio todos los dias. Lo que no tiene sentido es evaluarlos con los siete
 # filtros del metodo.
-ETFS_NO_ANALIZAR = [
-    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND",   # nucleo de la cartera
-    "ITA",                                                # sectorial de defensa
-    "WT",                                                 # WisdomTree es la GESTORA (accion), no un ETF: se deja
-]
-# WT se saca de la lista de exclusion: es WisdomTree Inc., la empresa que
-# administra los ETF, y cotiza como accion normal. Estaba puesta arriba solo
-# para dejar escrito por que NO se excluye.
-ETFS_NO_ANALIZAR = [t for t in ETFS_NO_ANALIZAR if t != "WT"]
+ETFS_NO_ANALIZAR = (
+    ["VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND"]   # nucleo de la cartera
+    + ["ARKK"]                                            # gestion activa de tecnologia
+    + ["URSP"]                                            # apalancado 2x sobre el S&P equiponderado
+    # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
+    # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
+    # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
+    + [t for _, t in ETFS_SECTOR]
+    + [t for _, t in ETFS_INDUSTRIA]
+)
+# WT NO va en esta lista: es WisdomTree Inc., la empresa que administra los
+# ETF, y cotiza como accion normal. Se deja escrito porque es el error facil
+# de cometer al leer la lista rapido.
+_vistos = set()
+ETFS_NO_ANALIZAR = [t for t in ETFS_NO_ANALIZAR
+                    if not (t in _vistos or _vistos.add(t))]
+del _vistos
 
 # El universo real del analisis: los dos indices MAS la grilla (que trae
 # cosas que no estan en ningun indice y Cristian igual quiere mirar --

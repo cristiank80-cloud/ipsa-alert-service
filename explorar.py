@@ -79,20 +79,16 @@ import indicador_fuerza_fase
 # ---------------------------------------------------------------------------
 BENCHMARK = "SPY"
 
-ETFS_SECTOR = [
-    ("Tecnología", "XLK"), ("Salud", "XLV"), ("Financiero", "XLF"),
-    ("Consumo discrecional", "XLY"), ("Consumo básico", "XLP"),
-    ("Energía", "XLE"), ("Industrial", "XLI"), ("Materiales", "XLB"),
-    ("Utilities", "XLU"), ("Inmobiliario", "XLRE"), ("Comunicaciones", "XLC"),
-]
-
-ETFS_INDUSTRIA = [
-    ("Semiconductores", "SMH"), ("Software", "IGV"), ("Ciberseguridad", "CIBR"),
-    ("Biotecnología", "XBI"), ("Aeroespacial y defensa", "ITA"),
-    ("Banca regional", "KRE"), ("Retail", "XRT"), ("Petróleo y gas E&P", "XOP"),
-    ("Oro y mineras", "GDX"), ("Transporte", "IYT"),
-    ("Infraestructura", "PAVE"), ("Nuclear / uranio", "URA"),
-]
+# ETFS_SECTOR y ETFS_INDUSTRIA se DEFINIAN aca hasta el 27-ago-2026. Ahora
+# viven en main.py y se importan, porque desde esa fecha los 23 tambien
+# estan en la grilla (TICKERS_USA) y en la lista de exclusion del embudo
+# (ETFS_NO_ANALIZAR): tenerlos escritos en dos archivos era pedir que algun
+# dia quedaran distintos sin que nada avisara.
+#
+# El import va en esta direccion y no al reves: main.py no importa nada, asi
+# que no puede haber circularidad. El formato no cambio -- siguen siendo
+# pares (nombre, ticker) y se usan igual mas abajo.
+from main import ETFS_SECTOR, ETFS_INDUSTRIA
 
 # Umbrales del embudo. Son los del documento; el frontend los puede mandar
 # distintos para explorar, pero estos son el default.
