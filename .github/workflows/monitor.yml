@@ -39,6 +39,40 @@ on:
     - cron: '0 23 * * 5'   # viernes 23:00 UTC = 19:00 Chile (20:00 en verano)
     - cron: '0 11 * * 1'   # lunes   11:00 UTC = 07:00 Chile (08:00 en verano)
 
+    # ---- Tres ventanas de actualizacion el fin de semana (agosto 2026) ----
+    # A pedido: sabado y domingo el servicio despierta a las 10:00, 13:00 y
+    # 17:00 de Chile, se queda UNA HORA arriba, y se vuelve a suspender.
+    #
+    # PARA QUE SIRVE. La app guarda en el telefono/navegador el ultimo dato
+    # real que recibio (ver saveCache/hydrateFromCache en index.html), asi
+    # que con el servicio caido igual muestra el ultimo registro. Estas
+    # ventanas son para que ese "ultimo registro" se pueda refrescar el fin
+    # de semana en vez de quedarse con el cierre del viernes: basta abrir la
+    # app dentro de la hora que esta encendido.
+    #
+    # OJO CON QUE SE REFRESCA DE VERDAD: la Bolsa de Santiago y la de EE.UU.
+    # estan CERRADAS sabado y domingo, asi que sus precios van a devolver el
+    # mismo cierre del viernes. Lo que si cambia es el BITCOIN (se transa
+    # 24/7) y el tipo de cambio. Se refresca todo igual porque es mas simple
+    # y no cuesta mas, pero conviene saber por que las acciones no se mueven.
+    #
+    # COSTO EN HORAS GRATIS. Un servicio suspendido no consume horas. Estas
+    # 3 h por dia x 2 dias = 6 h por fin de semana, ~26 h al mes. Sumado a
+    # los 22 dias habiles encendidos 24/7 (528 h) da ~554 h, comodamente
+    # bajo el tope de 750 h/mes del plan gratuito.
+    #
+    # HORA DE CHILE: igual que el resto del archivo, estos cron son UTC y no
+    # siguen el cambio de hora. En invierno (UTC-4) caen a las 10/13/17 y en
+    # verano (UTC-3) corren una hora, a las 11/14/18. Se acepta ese desfase
+    # a proposito -- corregirlo obligaria a editar el archivo dos veces al
+    # año, y para "despertar un rato" una hora de diferencia da lo mismo.
+    - cron: '0 14 * * 6,0'   # despertar · 14:00 UTC = 10:00 Chile (11:00 en verano)
+    - cron: '0 17 * * 6,0'   # despertar · 17:00 UTC = 13:00 Chile (14:00 en verano)
+    - cron: '0 21 * * 6,0'   # despertar · 21:00 UTC = 17:00 Chile (18:00 en verano)
+    - cron: '0 15 * * 6,0'   # suspender · una hora despues del primero
+    - cron: '0 18 * * 6,0'   # suspender · una hora despues del segundo
+    - cron: '0 22 * * 6,0'   # suspender · una hora despues del tercero
+
   workflow_dispatch: {}   # permite ejecutarlo a mano desde GitHub para probar
 
 jobs:
@@ -153,6 +187,80 @@ jobs:
           echo "HTTP status: $codigo"
           cat respuesta.txt
           echo ""
+          if [ "$codigo" -ge 300 ]; then exit 1; fi
+
+  # ---- Ventanas de fin de semana (ver los cron de arriba) ----
+  # Tampoco llevan workflow_dispatch: probar el workflow a mano no debe
+  # encender ni apagar el servicio sin querer, mismo criterio que los dos
+  # jobs de abajo.
+  despertar-fin-de-semana:
+    if: >-
+      github.event.schedule == '0 14 * * 6,0' ||
+      github.event.schedule == '0 17 * * 6,0' ||
+      github.event.schedule == '0 21 * * 6,0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reanudar el servicio en Render
+        run: |
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          echo ""
+          # 400 = ya estaba activo (por ejemplo si lo encendiste a mano).
+          # No es un fallo: igual queremos calentar la cache mas abajo.
+          if [ "$codigo" = "400" ]; then
+            echo "El servicio ya estaba activo; se sigue igual."
+          elif [ "$codigo" -ge 300 ]; then
+            exit 1
+          fi
+
+      # Reanudar devuelve enseguida, pero el contenedor tarda en levantar.
+      # Sin esto, la primera consulta que haga Cristian al abrir la app se
+      # come el arranque completo (medio minuto o mas). Calentar la cache
+      # aca hace que, cuando abra la app dentro de la hora, responda al tiro.
+      - name: Esperar a que levante y calentar la cache de precios
+        run: |
+          BASE="https://ipsa-alert-service.onrender.com"
+          arriba=0
+          for i in $(seq 1 20); do
+            codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$BASE/quotes" || echo "000")
+            echo "intento $i -> $codigo"
+            if [ "$codigo" = "200" ]; then arriba=1; break; fi
+            sleep 15
+          done
+          if [ "$arriba" != "1" ]; then
+            echo "El servicio no respondio a tiempo; queda encendido igual y la app lo va a despertar sola."
+            exit 0
+          fi
+          # /quotes ya quedo caliente con el intento que devolvio 200.
+          # Falta el lote de EE.UU. (y con el, bitcoin, que es lo unico que
+          # de verdad se mueve el fin de semana).
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$BASE/quotes-usa" || echo "000")
+          echo "/quotes-usa -> $codigo"
+
+  suspender-ventana-fin-de-semana:
+    if: >-
+      github.event.schedule == '0 15 * * 6,0' ||
+      github.event.schedule == '0 18 * * 6,0' ||
+      github.event.schedule == '0 22 * * 6,0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Volver a suspender el servicio en Render
+        run: |
+          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend")
+          echo "HTTP status: $codigo"
+          cat respuesta.txt
+          echo ""
+          # 400 = ya estaba suspendido. No es un fallo: es justo el estado
+          # que queriamos dejar.
+          if [ "$codigo" = "400" ]; then
+            echo "El servicio ya estaba suspendido; nada que hacer."
+            exit 0
+          fi
           if [ "$codigo" -ge 300 ]; then exit 1; fi
 
   reanudar-lunes:
