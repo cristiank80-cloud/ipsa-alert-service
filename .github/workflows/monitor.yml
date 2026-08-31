@@ -36,50 +36,88 @@ on:
     # digesto. Un servicio suspendido NO consume horas gratis de Render, y
     # con esto los 5 dias habiles quedan encendidos 24/7: 22 x 24 = 528 h,
     # comodamente bajo el tope de 750 h/mes del plan gratuito.
-    - cron: '0 23 * * 5'   # viernes 23:00 UTC = 19:00 Chile (20:00 en verano)
-    - cron: '0 11 * * 1'   # lunes   11:00 UTC = 07:00 Chile (08:00 en verano)
+    - cron: '17 23 * * 5'   # viernes 23:17 UTC = 19:17 Chile (20:17 en verano)
+    - cron: '17 10 * * 1'   # lunes   10:17 UTC = 06:17 Chile (07:17 en verano)
 
-    # ---- Tres ventanas de actualizacion el fin de semana (agosto 2026) ----
-    # A pedido: sabado y domingo el servicio despierta a las 10:00, 13:00 y
-    # 17:00 de Chile, se queda UNA HORA arriba, y se vuelve a suspender.
+    # ---- Ventana unica de fin de semana (septiembre 2026) ----
+    # POR QUE CAMBIO. Antes habia tres ventanas de una hora (10:00, 13:00 y
+    # 17:00 de Chile). No funcionaron. GitHub Actions, en el plan gratuito,
+    # NO garantiza la hora del cron: encola los trabajos y los suelta cuando
+    # hay maquinas libres. Medido en este mismo repo:
+    #   - domingo 30-08-2026, cron '0 17 * * 6,0' -> corrio 17:59 UTC (+59 min)
+    #   - domingo 30-08-2026, cron '0 21 * * 6,0' -> corrio 23:18 UTC (+2 h 18)
+    #   - domingo 30-08-2026, cron '0 22 * * 6,0' -> corrio 00:11 UTC del lunes
+    #   - lunes   31-08-2026, cron '0 11 * * 1'   -> no corrio en toda la manana
+    # Con ventanas de UNA hora, un atraso asi las deja fuera de lugar: el
+    # servicio despertaba cuando ya no servia (o no despertaba).
     #
-    # PARA QUE SIRVE. La app guarda en el telefono/navegador el ultimo dato
-    # real que recibio (ver saveCache/hydrateFromCache en index.html), asi
-    # que con el servicio caido igual muestra el ultimo registro. Estas
-    # ventanas son para que ese "ultimo registro" se pueda refrescar el fin
-    # de semana en vez de quedarse con el cierre del viernes: basta abrir la
-    # app dentro de la hora que esta encendido.
+    # QUE SE HACE AHORA. Una sola ventana larga por dia: se enciende
+    # temprano y se apaga en la tarde. Aunque GitHub se atrase dos horas, la
+    # ventana igual cubre las 10:00, las 13:00 y las 17:00 de Chile. Ademas
+    # hay un segundo "despertar" a media manana que no hace nada si el
+    # servicio ya esta arriba, y que lo salva si el primero no corrio.
     #
-    # OJO CON QUE SE REFRESCA DE VERDAD: la Bolsa de Santiago y la de EE.UU.
-    # estan CERRADAS sabado y domingo, asi que sus precios van a devolver el
-    # mismo cierre del viernes. Lo que si cambia es el BITCOIN (se transa
-    # 24/7) y el tipo de cambio. Se refresca todo igual porque es mas simple
-    # y no cuesta mas, pero conviene saber por que las acciones no se mueven.
+    # NADA EN EL MINUTO 0. El minuto en punto es el mas congestionado de
+    # GitHub (es donde programa todo el mundo). Por eso ningun cron nuevo de
+    # este archivo cae en el minuto 0.
     #
-    # COSTO EN HORAS GRATIS. Un servicio suspendido no consume horas. Estas
-    # 3 h por dia x 2 dias = 6 h por fin de semana, ~26 h al mes. Sumado a
-    # los 22 dias habiles encendidos 24/7 (528 h) da ~554 h, comodamente
-    # bajo el tope de 750 h/mes del plan gratuito.
-    #
-    # HORA DE CHILE: igual que el resto del archivo, estos cron son UTC y no
-    # siguen el cambio de hora. En invierno (UTC-4) caen a las 10/13/17 y en
-    # verano (UTC-3) corren una hora, a las 11/14/18. Se acepta ese desfase
-    # a proposito -- corregirlo obligaria a editar el archivo dos veces al
-    # año, y para "despertar un rato" una hora de diferencia da lo mismo.
-    - cron: '0 14 * * 6,0'   # despertar · 14:00 UTC = 10:00 Chile (11:00 en verano)
-    - cron: '0 17 * * 6,0'   # despertar · 17:00 UTC = 13:00 Chile (14:00 en verano)
-    - cron: '0 21 * * 6,0'   # despertar · 21:00 UTC = 17:00 Chile (18:00 en verano)
-    - cron: '0 15 * * 6,0'   # suspender · una hora despues del primero
-    - cron: '0 18 * * 6,0'   # suspender · una hora despues del segundo
-    - cron: '0 22 * * 6,0'   # suspender · una hora despues del tercero
+    # COSTO EN HORAS GRATIS. ~11 h por dia x 2 dias = 22 h por fin de
+    # semana, ~95 h al mes. Sumado a los dias habiles encendidos 24/7
+    # (~470 h) da ~565 h, comodamente bajo el tope de 750 h/mes del plan
+    # gratuito de Render.
+    - cron: '13 11 * * 6,0'   # despertar  · 11:13 UTC = 07:13 Chile (08:13 en verano)
+    - cron: '43 15 * * 6,0'   # reasegurar · por si el despertar de arriba no corrio
+    - cron: '13 22 * * 6,0'   # suspender  · 22:13 UTC = 18:13 Chile (19:13 en verano)
 
-  workflow_dispatch: {}   # permite ejecutarlo a mano desde GitHub para probar
+  # Boton manual: GitHub -> Actions -> Monitoreo IPSA -> "Run workflow".
+  # Sirve para encender el servicio a mano cuando GitHub se atrasa con el
+  # cron, sin tener que entrar a Render. "revisar" es lo que hacia antes.
+  workflow_dispatch:
+    inputs:
+      accion:
+        description: 'Que hacer'
+        type: choice
+        default: 'revisar'
+        options:
+          - revisar
+          - despertar
+          - suspender
 
 jobs:
   run-check:
-    if: github.event.schedule == '*/10 12-21 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '*/10 12-21 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'revisar')
     runs-on: ubuntu-latest
     steps:
+      # RED DE SEGURIDAD (agregada el 31-08-2026).
+      # Si el servicio quedo suspendido en un dia habil -- por ejemplo
+      # porque GitHub no disparo a la hora el cron del lunes, que fue
+      # exactamente lo que paso ese dia -- este paso lo enciende solo.
+      # Como run-check corre cada 10 minutos, cualquier "despertar"
+      # perdido se corrige solo en 10 minutos, en vez de dejar la app sin
+      # datos hasta que alguien se de cuenta.
+      - name: Asegurar que el servicio este encendido
+        run: |
+          BASE="https://ipsa-alert-service.onrender.com"
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$BASE/quotes" || echo "000")
+          echo "estado inicial de /quotes -> $codigo"
+          if [ "$codigo" = "200" ]; then
+            echo "El servicio ya estaba arriba; nada que hacer."
+            exit 0
+          fi
+          echo "No responde. Se pide reanudarlo en Render."
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume")
+          echo "resume -> $codigo (400 = ya estaba activo)"
+          for i in $(seq 1 20); do
+            codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$BASE/quotes" || echo "000")
+            echo "intento $i -> $codigo"
+            if [ "$codigo" = "200" ]; then break; fi
+            sleep 15
+          done
+
       - name: Llamar a /run-check en Render
         run: |
           codigo=$(curl -s -o respuesta.txt -w "%{http_code}" \
@@ -176,7 +214,7 @@ jobs:
   # proposito: si lo llevaran, probar el workflow a mano desde GitHub
   # suspenderia el servicio sin querer.
   suspender-fin-de-semana:
-    if: github.event.schedule == '0 23 * * 5'
+    if: github.event.schedule == '17 23 * * 5'
     runs-on: ubuntu-latest
     steps:
       - name: Suspender el servicio en Render
@@ -189,15 +227,16 @@ jobs:
           echo ""
           if [ "$codigo" -ge 300 ]; then exit 1; fi
 
-  # ---- Ventanas de fin de semana (ver los cron de arriba) ----
-  # Tampoco llevan workflow_dispatch: probar el workflow a mano no debe
-  # encender ni apagar el servicio sin querer, mismo criterio que los dos
-  # jobs de abajo.
+  # ---- Ventana de fin de semana (ver los cron de arriba) ----
+  # Estos dos SI se pueden correr a mano, pero solo eligiendo "despertar" o
+  # "suspender" en el boton Run workflow. Con la opcion por defecto
+  # ("revisar") no se tocan, asi que probar el workflow a mano no enciende
+  # ni apaga el servicio sin querer.
   despertar-fin-de-semana:
     if: >-
-      github.event.schedule == '0 14 * * 6,0' ||
-      github.event.schedule == '0 17 * * 6,0' ||
-      github.event.schedule == '0 21 * * 6,0'
+      github.event.schedule == '13 11 * * 6,0' ||
+      github.event.schedule == '43 15 * * 6,0' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'despertar')
     runs-on: ubuntu-latest
     steps:
       - name: Reanudar el servicio en Render
@@ -242,9 +281,8 @@ jobs:
 
   suspender-ventana-fin-de-semana:
     if: >-
-      github.event.schedule == '0 15 * * 6,0' ||
-      github.event.schedule == '0 18 * * 6,0' ||
-      github.event.schedule == '0 22 * * 6,0'
+      github.event.schedule == '13 22 * * 6,0' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'suspender')
     runs-on: ubuntu-latest
     steps:
       - name: Volver a suspender el servicio en Render
@@ -264,7 +302,7 @@ jobs:
           if [ "$codigo" -ge 300 ]; then exit 1; fi
 
   reanudar-lunes:
-    if: github.event.schedule == '0 11 * * 1'
+    if: github.event.schedule == '17 10 * * 1'
     runs-on: ubuntu-latest
     steps:
       - name: Reanudar el servicio en Render
