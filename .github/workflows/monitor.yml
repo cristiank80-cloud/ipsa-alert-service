@@ -128,7 +128,9 @@ jobs:
           if [ "$codigo" -ge 400 ]; then exit 1; fi
 
   digesto-alertas:
-    if: github.event.schedule == '*/10 12-22 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '*/10 12-22 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'revisar')
     runs-on: ubuntu-latest
     steps:
       - name: Llamar a /enviar-digesto en Render
@@ -141,7 +143,9 @@ jobs:
           if [ "$codigo" -ge 400 ]; then exit 1; fi
 
   resumen-diario:
-    if: github.event.schedule == '*/10 19-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '*/10 19-20 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'revisar')
     runs-on: ubuntu-latest
     steps:
       - name: Llamar a /resumen-diario en Render
@@ -159,7 +163,9 @@ jobs:
     # decide adentro (via /ipsa-valor-hoy) si ya hay dato de hoy; este job
     # ademas es idempotente por su cuenta (revisa el CSV antes de escribir),
     # asi que no importa que la ventana llame varias veces cada 10 minutos.
-    if: github.event.schedule == '*/10 19-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '*/10 19-20 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && inputs.accion == 'revisar')
     runs-on: ubuntu-latest
     # Necesario para que el GITHUB_TOKEN automatico de este job pueda hacer
     # commit y push al propio repo (ipsa-alert-service). Si el repo tiene
