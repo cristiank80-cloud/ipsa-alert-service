@@ -490,8 +490,37 @@ def _universo_conocido():
     return set(UNIVERSO_ANALISIS) | universo_mercado.simbolos_en_cache()
 
 
+def _mercado_completo_listo():
+    """
+    True solo si la lista del mercado completo YA esta en memoria.
+
+    POR QUE HACE FALTA SABERLO
+    ===========================
+    Esa cache vive en memoria y se pierde en cada reinicio (en el plan gratis
+    de Render los reinicios pasan solos, por inactividad). Mientras no se
+    rearma, _universo_conocido() es solo el nucleo: S&P 500 + Nasdaq-100 +
+    la grilla. Una candidata del RESTO del mercado -- FLYW, LFST -- queda
+    fuera, y validarla contra un universo incompleto la rechaza como si no
+    existiera.
+
+    "No lo tengo en la lista todavia" NO es lo mismo que "no existe". Con
+    esta funcion los dos lugares que validan simbolos pueden distinguirlos:
+    ver /accion y _limpiar_watchlist().
+    """
+    return bool(universo_mercado.simbolos_en_cache())
+
+
 def _limpiar_watchlist(simbolos):
     universo = _universo_conocido()
+    # MISMO CRITERIO QUE /accion: si el mercado completo todavia no se bajo,
+    # NO se descarta por universo. El telefono manda su watchlist entera cada
+    # vez que se abre la app; con la cache vacia (reinicio de Render) las
+    # candidatas del resto del mercado se caian aca EN SILENCIO, el servidor
+    # dejaba de pedirles precio, y en la app quedaban para siempre sin precio
+    # sin que nada explicara por que. Esos simbolos ya se validaron cuando se
+    # agregaron: perderlos porque el servidor todavia no termina de arrancar
+    # es perder datos del usuario por un detalle interno.
+    filtrar_por_universo = _mercado_completo_listo()
     en_grilla = set(TICKERS_USA)
     limpia, vistos = [], set()
     for s in simbolos:
@@ -501,7 +530,9 @@ def _limpiar_watchlist(simbolos):
         # Ya estar en la grilla no es un error del frontend: es el caso
         # normal cuando una candidata que estaba fuera despues entra. Se
         # ignora en silencio porque ya recibe precio por el camino de siempre.
-        if not t or t in vistos or t in en_grilla or t not in universo:
+        if not t or t in vistos or t in en_grilla:
+            continue
+        if filtrar_por_universo and t not in universo:
             continue
         vistos.add(t)
         limpia.append(t)
@@ -826,7 +857,17 @@ def accion():
     ticker = (request.args.get("ticker") or "").upper().strip()
     if not ticker:
         return jsonify({"error": "falta el parametro ticker"}), 400
-    if ticker not in _universo_conocido():
+    # Si el simbolo no esta en el universo conocido puede ser por dos motivos
+    # distintos, y solo UNO justifica rechazarlo:
+    #   * el mercado completo YA esta cargado y aun asi no aparece -> no existe.
+    #   * el mercado completo todavia NO se bajo (reinicio reciente de Render)
+    #     -> no se sabe, y rechazar seria inventar una respuesta. Se deja pasar
+    #     y decide Yahoo: si el simbolo no existe, mas abajo sale
+    #     "sin precio disponible para esa accion".
+    # Sin esto, tocar "Pedir datos ahora" sobre una candidata del resto del
+    # mercado devolvia "ticker 'FLYW' no reconocido" -- un error que no se
+    # podia arreglar desde la app y que ademas era falso.
+    if ticker not in _universo_conocido() and _mercado_completo_listo():
         return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
 
     ahora = time.time()
