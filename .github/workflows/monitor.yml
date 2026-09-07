@@ -30,44 +30,31 @@ on:
     # servidor decide adentro la hora exacta y evita reenvios el mismo dia.
     # Mismo motivo que arriba: no depende del cambio de horario de Chile.
     - cron: '*/10 19-20 * * 1-5'
-    # Apagar/encender el servicio de Render el fin de semana. La Bolsa esta
-    # cerrada y NINGUN cron de arriba corre sabado ni domingo (todos terminan
-    # en "* * 1-5"), asi que suspender no hace perder ni un cruce ni un
-    # digesto. Un servicio suspendido NO consume horas gratis de Render, y
-    # con esto los 5 dias habiles quedan encendidos 24/7: 22 x 24 = 528 h,
-    # comodamente bajo el tope de 750 h/mes del plan gratuito.
-    - cron: '17 23 * * 5'   # viernes 23:17 UTC = 19:17 Chile (20:17 en verano)
-    - cron: '17 10 * * 1'   # lunes   10:17 UTC = 06:17 Chile (07:17 en verano)
-
-    # ---- Ventana unica de fin de semana (septiembre 2026) ----
-    # POR QUE CAMBIO. Antes habia tres ventanas de una hora (10:00, 13:00 y
-    # 17:00 de Chile). No funcionaron. GitHub Actions, en el plan gratuito,
-    # NO garantiza la hora del cron: encola los trabajos y los suelta cuando
-    # hay maquinas libres. Medido en este mismo repo:
-    #   - domingo 30-08-2026, cron '0 17 * * 6,0' -> corrio 17:59 UTC (+59 min)
-    #   - domingo 30-08-2026, cron '0 21 * * 6,0' -> corrio 23:18 UTC (+2 h 18)
-    #   - domingo 30-08-2026, cron '0 22 * * 6,0' -> corrio 00:11 UTC del lunes
-    #   - lunes   31-08-2026, cron '0 11 * * 1'   -> no corrio en toda la manana
-    # Con ventanas de UNA hora, un atraso asi las deja fuera de lugar: el
-    # servicio despertaba cuando ya no servia (o no despertaba).
+    # ---- Por que YA NO hay cron de encender/apagar (septiembre 2026) ----
+    # Antes este archivo suspendia el servicio en Render el fin de semana y
+    # lo reanudaba el lunes, para no gastar las 750 horas gratis del mes.
+    # Fallo dos lunes seguidos (31-08 y 07-09 de 2026): GitHub Actions, en
+    # el plan gratuito, NO garantiza el cron -- lo atrasa horas y a veces lo
+    # deja caer del todo. Los lunes por la manana, que es el peak mundial de
+    # GitHub, no disparo NI UN run. Y como "suspendido" es un estado del que
+    # solo se sale con otra llamada a la API, la app quedaba sin datos hasta
+    # que alguien se diera cuenta a mano.
     #
-    # QUE SE HACE AHORA. Una sola ventana larga por dia: se enciende
-    # temprano y se apaga en la tarde. Aunque GitHub se atrase dos horas, la
-    # ventana igual cubre las 10:00, las 13:00 y las 17:00 de Chile. Ademas
-    # hay un segundo "despertar" a media manana que no hace nada si el
-    # servicio ya esta arriba, y que lo salva si el primero no corrio.
+    # LO QUE APRENDIMOS. Render ya hace el ahorro solo: un servicio gratis
+    # se DUERME a los 15 minutos sin trafico, dormir NO consume horas
+    # gratis, y despierta solo con la siguiente visita (demora ~1 minuto).
+    # O sea, todo el andamiaje de suspender/reanudar no ahorraba nada que
+    # Render no ahorrara igual, y a cambio dejaba el servicio dependiendo de
+    # un cron poco confiable. Por eso se saco entero.
     #
-    # NADA EN EL MINUTO 0. El minuto en punto es el mas congestionado de
-    # GitHub (es donde programa todo el mundo). Por eso ningun cron nuevo de
-    # este archivo cae en el minuto 0.
+    # COMO QUEDA. El servicio queda siempre "activo" en Render y se duerme y
+    # despierta solo. Los cron de arriba son solo para el trabajo de verdad
+    # (revisar cruces, mandar el digesto, guardar el IPSA) y, de paso,
+    # mantienen el servicio despierto durante el horario de bolsa. Fuera de
+    # ese horario se duerme, y abrir la app lo despierta sola.
     #
-    # COSTO EN HORAS GRATIS. ~11 h por dia x 2 dias = 22 h por fin de
-    # semana, ~95 h al mes. Sumado a los dias habiles encendidos 24/7
-    # (~470 h) da ~565 h, comodamente bajo el tope de 750 h/mes del plan
-    # gratuito de Render.
-    - cron: '13 11 * * 6,0'   # despertar  · 11:13 UTC = 07:13 Chile (08:13 en verano)
-    - cron: '43 15 * * 6,0'   # reasegurar · por si el despertar de arriba no corrio
-    - cron: '13 22 * * 6,0'   # suspender  · 22:13 UTC = 18:13 Chile (19:13 en verano)
+    # HORAS GRATIS: ~10-11 h por dia habil = ~240 h al mes, bastante menos
+    # que antes y muy lejos del tope de 750 h/mes.
 
   # Boton manual: GitHub -> Actions -> Monitoreo IPSA -> "Run workflow".
   # Sirve para encender el servicio a mano cuando GitHub se atrasa con el
@@ -81,7 +68,6 @@ on:
         options:
           - revisar
           - despertar
-          - suspender
 
 jobs:
   run-check:
@@ -216,33 +202,13 @@ jobs:
           git commit -m "IPSA $FECHA: $VALOR (automatico via monitor.yml)"
           git push
 
-  # Estos dos jobs NO llevan "|| github.event_name == 'workflow_dispatch'" a
-  # proposito: si lo llevaran, probar el workflow a mano desde GitHub
-  # suspenderia el servicio sin querer.
-  suspender-fin-de-semana:
-    if: github.event.schedule == '17 23 * * 5'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Suspender el servicio en Render
-        run: |
-          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend")
-          echo "HTTP status: $codigo"
-          cat respuesta.txt
-          echo ""
-          if [ "$codigo" -ge 300 ]; then exit 1; fi
-
-  # ---- Ventana de fin de semana (ver los cron de arriba) ----
-  # Estos dos SI se pueden correr a mano, pero solo eligiendo "despertar" o
-  # "suspender" en el boton Run workflow. Con la opcion por defecto
-  # ("revisar") no se tocan, asi que probar el workflow a mano no enciende
-  # ni apaga el servicio sin querer.
-  despertar-fin-de-semana:
-    if: >-
-      github.event.schedule == '13 11 * * 6,0' ||
-      github.event.schedule == '43 15 * * 6,0' ||
-      (github.event_name == 'workflow_dispatch' && inputs.accion == 'despertar')
+  # ---- Despertar el servicio a mano ----
+  # Ya no lo llama ningun cron. Queda como boton de emergencia por si el
+  # servicio alguna vez quedara SUSPENDIDO de verdad (por ejemplo si lo
+  # suspendes tu mismo desde el panel de Render): dormido por inactividad
+  # despierta solo, suspendido no.
+  despertar-servicio:
+    if: github.event_name == 'workflow_dispatch' && inputs.accion == 'despertar'
     runs-on: ubuntu-latest
     steps:
       - name: Reanudar el servicio en Render
@@ -284,45 +250,3 @@ jobs:
           # de verdad se mueve el fin de semana).
           codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$BASE/quotes-usa" || echo "000")
           echo "/quotes-usa -> $codigo"
-
-  suspender-ventana-fin-de-semana:
-    if: >-
-      github.event.schedule == '13 22 * * 6,0' ||
-      (github.event_name == 'workflow_dispatch' && inputs.accion == 'suspender')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Volver a suspender el servicio en Render
-        run: |
-          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend")
-          echo "HTTP status: $codigo"
-          cat respuesta.txt
-          echo ""
-          # 400 = ya estaba suspendido. No es un fallo: es justo el estado
-          # que queriamos dejar.
-          if [ "$codigo" = "400" ]; then
-            echo "El servicio ya estaba suspendido; nada que hacer."
-            exit 0
-          fi
-          if [ "$codigo" -ge 300 ]; then exit 1; fi
-
-  reanudar-lunes:
-    if: github.event.schedule == '17 10 * * 1'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Reanudar el servicio en Render
-        run: |
-          codigo=$(curl -s -o respuesta.txt -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume")
-          echo "HTTP status: $codigo"
-          cat respuesta.txt
-          echo ""
-          # 400 = "no estaba suspendido" (por ejemplo si lo reanudaste a mano
-          # antes). Eso NO es un fallo: el servicio esta arriba igual.
-          if [ "$codigo" = "400" ]; then
-            echo "El servicio ya estaba activo; nada que hacer."
-            exit 0
-          fi
-          if [ "$codigo" -ge 300 ]; then exit 1; fi
