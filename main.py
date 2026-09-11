@@ -161,6 +161,24 @@ TICKERS_USA = [
     "SKWD", "ERO", "ENVA", "PAYS", "WT",
 
     # --- Cripto (agosto 2026, a pedido de Cristian) ---
+    # ACTUALIZADO 27-ago-2026: EN EL FRONTEND esto ya NO vive en la grilla de
+    # EE.UU. -- se movio a `stocksCripto`, que es el ambiente Cripto, y ahi se
+    # muestra EN PESOS (Cristian compra en Buda.com, en pesos; mientras estuvo
+    # del lado de EE.UU. su costo se guardaba como si fueran dolares y la
+    # tarjeta marcaba -99,9%).
+    #
+    # ACA, EN EL BACKEND, TIENE QUE SEGUIR EN ESTA LISTA. De aca sale su
+    # precio, por /quotes-usa, igual que antes; el frontend lo multiplica por
+    # el dolar observado que ya recibe en /quotes. Sacarlo de aca dejaria la
+    # tarjeta en "Calculando..." para siempre.
+    #
+    # Por eso la comprobacion "backend y frontend tienen la misma lista" ahora
+    # es contra la UNION de las dos listas del frontend:
+    #     TICKERS_USA  ==  stocksUSA  +  stocksCripto
+    #
+    # Agregar otra moneda son tres lugares: el ticker aca, en CRIPTO_TICKERS
+    # del frontend y en su `stocksCripto`. Yahoo las nombra PAR-USD
+    # (ETH-USD, SOL-USD), igual que BTC-USD.
     # Yahoo entrega BTC-USD por el mismo endpoint de precio/historial que
     # cualquier accion (ver data_source.get_market_data, suffix=""), asi que
     # no necesita ningun codigo aparte para aparecer en la grilla ni para
@@ -243,6 +261,30 @@ TICKERS_USA = [
     #           embudo la deja en "sin dato", es por eso y no por un error.
     #   UBS  -- UBS Group AG, banca global (la accion que cotiza en NYSE).
     "ARKK", "BUSE", "HNGE", "IYT", "UBS", "URSP",
+
+    # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (11-sep-2026)
+    # -----------------------------------------------------------------------
+    # Mismo pedido de siempre, lista mas larga: de los 14 tickers que paso
+    # esta vez, 10 ya estaban en la grilla (ARKK, BUSE, DELL, HNGE, IYT,
+    # LLY, MA, UBS, URSP, V -- los primeros seis del bloque de arriba,
+    # 27-ago-2026, y los otros cuatro de antes). Estas cuatro son las que
+    # faltaban de verdad. Las cuatro son ACCIONES NORMALES, ninguna es ETF,
+    # asi que entran al embudo completo (UNIVERSO_ANALISIS) apenas se
+    # agregan aca -- no van a ETFS_NO_ANALIZAR.
+    #
+    #   CF   -- CF Industries. Fertilizantes nitrogenados (NYSE). Ya era
+    #           miembro de SP500 mas abajo, asi que ya entraba al embudo;
+    #           lo que le faltaba era la grilla.
+    #   TECK -- Teck Resources Class B. Minera diversificada canadiense
+    #           (cobre, zinc), cotiza en NYSE. No es miembro de SP500 ni de
+    #           Nasdaq-100.
+    #   CDNA -- CareDx. Diagnostico de trasplantes / genomica (Nasdaq). No
+    #           es miembro de ningun indice de los que arma
+    #           UNIVERSO_ANALISIS.
+    #   DHT  -- DHT Holdings. Transporte maritimo de petroleo crudo (NYSE).
+    #           Tampoco es miembro de indice.
+    "CDNA", "CF", "DHT", "TECK",
 
     # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
