@@ -687,6 +687,24 @@ def _rsi(cierres, periodo=14):
     return round(100 - (100 / (1 + rs)), 1)
 
 
+def _ema(cierres, periodo=21):
+    """Media movil exponencial. None si falta historial.
+
+    Semilla con la SMA simple de los primeros `periodo` cierres y despues
+    aplica el factor de suavizado -- el mismo metodo que calcEMASeries() en
+    el frontend (index.html), a proposito: si alguna vez hay que comparar
+    el valor que manda el backend contra el que calcularia el navegador,
+    tienen que salir iguales.
+    """
+    if len(cierres) < periodo:
+        return None
+    k = 2 / (periodo + 1)
+    ema_val = sum(cierres[:periodo]) / periodo
+    for c in cierres[periodo:]:
+        ema_val = c * k + ema_val * (1 - k)
+    return ema_val
+
+
 def _desv_estandar(valores):
     n = len(valores)
     if n < 2:
@@ -827,6 +845,12 @@ def _estadisticas(puntos, dias_promedio=90):
         "rsi14": _rsi(cierres, 14),
         "sma20": (sum(cierres[-20:]) / 20) if len(cierres) >= 20 else None,
         "sma50": (sum(cierres[-50:]) / 50) if len(cierres) >= 50 else None,
+        # sma100 y ema21 (11-sep-2026, a pedido de Cristian, para calzar con
+        # su TradingView): mismo criterio que sma100 -- sobre cierres
+        # diarios reales, con el "1y" que ya se pide para todo lo demas
+        # (~252 dias habiles alcanza de sobra para los 100/21 que necesitan).
+        "sma100": (sum(cierres[-100:]) / 100) if len(cierres) >= 100 else None,
+        "ema21": _ema(cierres, 21),
         # Igual que sma20/sma50: media simple sobre cierres diarios reales.
         # Con el "1y" que ya se pide para todo lo demas (~252 dias habiles)
         # alcanza para los 200 que necesita, sin pedir una ventana mas larga
