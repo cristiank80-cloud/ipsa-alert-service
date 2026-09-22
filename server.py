@@ -2218,6 +2218,73 @@ def diagnostico_lote():
                     "serverTime": datetime.now(timezone.utc).isoformat()})
 
 
+# --------------------------------------------------------------------------
+# EL LATIDO: "¿me estan revisando?", contestado SIN token
+# --------------------------------------------------------------------------
+# EL DIA QUE ESTO NACIO (22-sep-2026)
+# ===================================
+# Cristian vendio Visa a mano al ver que estaba bajo su stop de 365, sin
+# haber recibido ni push ni correo. No fallo el push, ni la clave VAPID, ni
+# Resend: /diag decia "checks_totales": 0 y "ultimo_check_ok": null. O sea,
+# NADIE habia llamado a /run-check desde que arranco el contenedor. El cron
+# gratuito de GitHub Actions no disparo (la misma falla que ya mato el
+# "reanudar" de dos lunes seguidos, ver el comentario largo de monitor.yml),
+# y sin esas llamadas cada 10 minutos Render se duerme a los 15. El servidor
+# no estuvo lento esa mañana: estuvo apagado.
+#
+# EL PROBLEMA DE FONDO NO ES EL CRON, ES QUE NO SE NOTA
+# =====================================================
+# El cron se puede cambiar por uno mejor -- y se hizo -- pero cualquier
+# llamador externo puede caerse alguna vez. Lo que no puede volver a pasar
+# es que se caiga EN SILENCIO. Desde la app, "no paso nada en el mercado" y
+# "no te estoy mirando" se veian exactamente iguales: todo verde.
+#
+# POR QUE NO ALCANZABA CON /diag
+# ==============================
+# /diag ya traia este dato, pero pide CHECK_SECRET, y la PWA no puede
+# llevar ese token: cualquiera que abra el HTML lo leeria. Por eso esto es
+# un endpoint aparte, publico, que contesta UNA sola pregunta y no expone
+# ningun secreto ni ningun precio.
+#
+# QUE SIGNIFICA `ok`
+# ==================
+# `ok` es false cuando NO se puede confiar en que las alertas esten
+# corriendo: o nunca hubo un chequeo bueno, o el ultimo es mas viejo que
+# LATIDO_MAX_MIN. Fuera del horario de bolsa `ok` es true a proposito
+# (`en_horario` false): de noche y los fines de semana que no haya chequeos
+# es lo normal, y un aviso ahi seria ruido que enseña a ignorar el aviso.
+LATIDO_MAX_MIN = int(os.environ.get("LATIDO_MAX_MIN", 30))
+
+
+@app.route("/latido", methods=["GET"])
+def latido():
+    """Publico a proposito: la app lo consulta al abrirse. Sin secretos."""
+    ahora_chile = datetime.now(TZ_CHILE)
+    en_horario = ahora_chile.weekday() < 5 and ahora_chile.hour in range(9, 19)
+
+    minutos = None
+    ultimo = _salud.get("ultimo_check_ok")
+    if ultimo:
+        try:
+            visto = datetime.fromisoformat(ultimo)
+            minutos = int((datetime.now(timezone.utc) - visto).total_seconds() // 60)
+        except Exception:
+            minutos = None
+
+    al_dia = minutos is not None and minutos <= LATIDO_MAX_MIN
+    return jsonify({
+        "ok": bool(al_dia or not en_horario),
+        "al_dia": bool(al_dia),
+        "en_horario": en_horario,
+        "ultimo_check_ok": ultimo,
+        "minutos_desde_ultimo_check": minutos,
+        "checks_totales": _salud.get("checks_totales", 0),
+        "fallos_seguidos": _salud.get("fallos_seguidos", 0),
+        "umbral_minutos": LATIDO_MAX_MIN,
+        "hora_chile": ahora_chile.isoformat(),
+    })
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "alive"})
