@@ -787,6 +787,23 @@ def quotes():
             "rsi14": s.get("rsi14"),
             "sma20": s.get("sma20"),
             "sma50": s.get("sma50"),
+            # sma100 y ema21 (22-sep-2026). ESTABAN CALCULADOS PERO NO SE
+            # MANDABAN. data_source.get_stats() los devuelve desde el
+            # 11-sep-2026 -- ver el dict de indicadores ahi -- pero estos
+            # tres payloads (/quotes, /accion, /quotes-usa) nunca los
+            # copiaron a la respuesta, asi que al frontend no llegaban.
+            #
+            # POR QUE SE VEIA COMO "LA MM100 NO CALCULA" Y NO COMO "FALTAN
+            # DOS INDICADORES": la EMA21 tiene respaldo local en el frontend
+            # (calcEMA sobre s.history), asi que se dibujaba igual y nadie
+            # notaba que no venia del servidor. La SMA100 NO tiene respaldo
+            # -- a proposito, como SMA200: 100 ticks de 60 segundos serian
+            # horas -- y por eso era la unica que se quedaba diciendo "No
+            # disponible (esperando datos o menos de 100 dias de historial)",
+            # un mensaje que ademas apuntaba al lado equivocado: el historial
+            # estaba completo, lo que faltaba era esta linea.
+            "sma100": s.get("sma100"),
+            "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
@@ -915,6 +932,23 @@ def accion():
             "rsi14": s.get("rsi14"),
             "sma20": s.get("sma20"),
             "sma50": s.get("sma50"),
+            # sma100 y ema21 (22-sep-2026). ESTABAN CALCULADOS PERO NO SE
+            # MANDABAN. data_source.get_stats() los devuelve desde el
+            # 11-sep-2026 -- ver el dict de indicadores ahi -- pero estos
+            # tres payloads (/quotes, /accion, /quotes-usa) nunca los
+            # copiaron a la respuesta, asi que al frontend no llegaban.
+            #
+            # POR QUE SE VEIA COMO "LA MM100 NO CALCULA" Y NO COMO "FALTAN
+            # DOS INDICADORES": la EMA21 tiene respaldo local en el frontend
+            # (calcEMA sobre s.history), asi que se dibujaba igual y nadie
+            # notaba que no venia del servidor. La SMA100 NO tiene respaldo
+            # -- a proposito, como SMA200: 100 ticks de 60 segundos serian
+            # horas -- y por eso era la unica que se quedaba diciendo "No
+            # disponible (esperando datos o menos de 100 dias de historial)",
+            # un mensaje que ademas apuntaba al lado equivocado: el historial
+            # estaba completo, lo que faltaba era esta linea.
+            "sma100": s.get("sma100"),
+            "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
@@ -986,6 +1020,23 @@ def quotes_usa():
             "rsi14": s.get("rsi14"),
             "sma20": s.get("sma20"),
             "sma50": s.get("sma50"),
+            # sma100 y ema21 (22-sep-2026). ESTABAN CALCULADOS PERO NO SE
+            # MANDABAN. data_source.get_stats() los devuelve desde el
+            # 11-sep-2026 -- ver el dict de indicadores ahi -- pero estos
+            # tres payloads (/quotes, /accion, /quotes-usa) nunca los
+            # copiaron a la respuesta, asi que al frontend no llegaban.
+            #
+            # POR QUE SE VEIA COMO "LA MM100 NO CALCULA" Y NO COMO "FALTAN
+            # DOS INDICADORES": la EMA21 tiene respaldo local en el frontend
+            # (calcEMA sobre s.history), asi que se dibujaba igual y nadie
+            # notaba que no venia del servidor. La SMA100 NO tiene respaldo
+            # -- a proposito, como SMA200: 100 ticks de 60 segundos serian
+            # horas -- y por eso era la unica que se quedaba diciendo "No
+            # disponible (esperando datos o menos de 100 dias de historial)",
+            # un mensaje que ademas apuntaba al lado equivocado: el historial
+            # estaba completo, lo que faltaba era esta linea.
+            "sma100": s.get("sma100"),
+            "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
