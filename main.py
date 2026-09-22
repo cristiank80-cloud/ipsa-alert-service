@@ -287,6 +287,37 @@ TICKERS_USA = [
     "CDNA", "CF", "DHT", "TECK",
 
     # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (22-sep-2026)
+    # -----------------------------------------------------------------------
+    # Dos simbolos, uno de cada tipo -- por eso no se tratan igual:
+    #
+    #   SPCX -- Space Exploration Technologies Corp. Clase A (Nasdaq). Es
+    #           ACCION NORMAL, asi que entra sola al embudo completo.
+    #           OJO CON SU HISTORIAL: salio a bolsa en junio de 2026, asi
+    #           que hoy tiene ~3 meses de precios. La SMA100 necesita 100
+    #           ruedas (~5 meses) y la fuerza relativa compara contra 1 año:
+    #           las dos van a decir "sin dato" hasta ~febrero de 2027. Eso
+    #           NO es un error de la app ni un simbolo muerto -- es una
+    #           empresa recien listada, igual que paso con HNGE. La tarjeta
+    #           igual muestra precio, variacion del dia y alerta de caida.
+    #
+    #   VLUE -- iShares MSCI USA Value Factor ETF (Cboe). Es ETF, asi que
+    #           ADEMAS va a ETFS_NO_ANALIZAR mas abajo: no tiene
+    #           capitalizacion ni crecimiento de utilidades que filtrar, y
+    #           sin esa exclusion el embudo lo mandaria a "revisar a mano"
+    #           en cada corrida para nada. No es de sector ni de industria
+    #           (es de FACTOR: value), asi que NO va en ETFS_SECTOR ni en
+    #           ETFS_INDUSTRIA -- esas dos listas son las del paso 1 de
+    #           Explorar y meterlo ahi le inventaria un sector que no tiene.
+    #
+    # LA GRILLA QUEDA EN 206. El acuerdo escrito era "si hay que agregar
+    # mas, primero sacar algo"; Cristian eligio agregar sin sacar (22-sep-
+    # 2026), porque el salto es chico (+1%). Si empiezan los 429 de Yahoo y
+    # tarjetas pegadas en "Calculando...", ese es el sintoma y ahi si hay
+    # que recortar.
+    "SPCX", "VLUE",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
@@ -472,6 +503,7 @@ ETFS_NO_ANALIZAR = (
     ["VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND"]   # nucleo de la cartera
     + ["ARKK"]                                            # gestion activa de tecnologia
     + ["URSP"]                                            # apalancado 2x sobre el S&P equiponderado
+    + ["VLUE"]                                            # factor value (22-sep-2026)
     # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
     # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
     # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
