@@ -318,6 +318,48 @@ TICKERS_USA = [
     "SPCX", "VLUE",
 
     # -----------------------------------------------------------------------
+    # ETF NUEVOS, AL SEPARAR LA PESTAÑA DE ETF (23-sep-2026)
+    # -----------------------------------------------------------------------
+    # Cristian separo la grilla de EE.UU. en dos ambientes, acciones y ETF, y
+    # pidio ademas ampliar la lista de ETF. Estos siete son los que AGREGAN
+    # algo que la grilla no tenia:
+    #
+    #   GLD  -- oro fisico. No habia ninguna exposicion a metales.
+    #   SLV  -- plata fisica. Idem.
+    #   TLT  -- bonos del Tesoro a 20+ años. BND es el agregado (corto y
+    #           largo mezclados); TLT es la parte larga sola, que es la que
+    #           se mueve con las tasas y sirve de contrapeso a las acciones.
+    #   VIG  -- dividendos CRECIENTES. No es lo mismo que SCHD, que busca
+    #           dividendo ALTO: son dos indices distintos y se comportan
+    #           distinto en una caida.
+    #   MTUM -- factor momentum.
+    #   QUAL -- factor calidad.
+    #   USMV -- factor minima volatilidad.
+    #           Los tres ultimos son los hermanos de VLUE (factor value, que
+    #           entro el 22-sep). Con los cuatro juntos se puede leer que
+    #           FACTOR esta mandando, que es una lectura que antes no existia
+    #           en la app.
+    #
+    # LO QUE SE DEJO FUERA A PROPOSITO, y por que -- son la misma curva dos
+    # veces, y una tarjeta duplicada no informa, solo gasta una peticion:
+    #
+    #   SPY, IVV -- siguen el mismo indice que VOO, que ya esta. SPY ademas
+    #               es el benchmark de Explorar (ver BENCHMARK en
+    #               explorar.py); tenerlo tambien como tarjeta confundiria
+    #               la referencia con una posicion.
+    #   QQQ      -- mismo indice que QQQM, que ya esta (QQQM es el mismo
+    #               fondo con menos comision).
+    #   AGG      -- mismo agregado de bonos que BND.
+    #   SOXX     -- mismos semiconductores que SMH, que ya esta como ETF de
+    #               industria del paso 1 de Explorar.
+    #
+    # COSTO: la grilla pasa de 206 a 213 (+3%). Sigue siendo la MISMA tanda
+    # de Yahoo cada 30 minutos -- separar la pestaña no cuesta nada, lo que
+    # cuesta son estos siete simbolos. Si empiezan los 429 y las tarjetas se
+    # quedan en "Calculando...", estos son los primeros candidatos a salir.
+    "GLD", "SLV", "TLT", "VIG", "MTUM", "QUAL", "USMV",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
@@ -504,6 +546,10 @@ ETFS_NO_ANALIZAR = (
     + ["ARKK"]                                            # gestion activa de tecnologia
     + ["URSP"]                                            # apalancado 2x sobre el S&P equiponderado
     + ["VLUE"]                                            # factor value (22-sep-2026)
+    # Los siete del 23-sep-2026 (ver el bloque de TICKERS_USA). Metales,
+    # bonos largos, dividendos crecientes y los tres factores que acompañan
+    # a VLUE. Ninguno tiene capitalizacion ni crecimiento de utilidades.
+    + ["GLD", "SLV", "TLT", "VIG", "MTUM", "QUAL", "USMV"]
     # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
     # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
     # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
@@ -517,6 +563,72 @@ _vistos = set()
 ETFS_NO_ANALIZAR = [t for t in ETFS_NO_ANALIZAR
                     if not (t in _vistos or _vistos.add(t))]
 del _vistos
+
+# ---------------------------------------------------------------------------
+# QUE ES UN ETF, EN UN SOLO LUGAR (23-sep-2026)
+# ---------------------------------------------------------------------------
+# Al separar la grilla de EE.UU. en dos ambientes (acciones y ETF) hizo falta
+# una respuesta a "¿este simbolo es un fondo?". Ya existia, pero escondida:
+# ETFS_NO_ANALIZAR es exactamente esa lista -- lo que se excluye del embudo
+# se excluye PORQUE es un fondo, no por otra razon.
+#
+# Se le pone nombre propio en vez de escribir una lista nueva, que es como
+# empiezan las listas que se desincronizan. Si algun dia hubiera un simbolo
+# que es ETF pero SI entra al embudo (o al reves), habria que separarlas de
+# verdad -- hoy no lo hay, y el assert de abajo lo deja escrito.
+#
+# OJO: `WT` NO esta aca, y esta bien. Es WisdomTree, la GESTORA de ETF, y
+# cotiza como accion normal. Es el error facil al leer la lista rapido.
+# Los ETF que NO son de sector ni de industria: los amplios, los de renta
+# fija, los metales y los de factor. Llevan nombre en español porque el
+# ranking de Explorar los muestra igual que a los 23 del paso 1 -- y porque
+# "VXUS" no le dice nada a nadie leyendo una lista a las siete de la manana.
+#
+# Los nombres son lo que el fondo SIGUE, no su nombre comercial: importa
+# poder comparar dos filas del ranking, no saber quien lo administra.
+ETFS_OTROS = [
+    ("S&P 500",                      "VOO"),
+    ("Mercado total EE.UU.",         "VTI"),
+    ("Mercado mundial",              "VT"),
+    ("Internacional (sin EE.UU.)",   "VXUS"),
+    ("Nasdaq 100",                   "QQQM"),
+    ("S&P 500 equiponderado (2x)",   "URSP"),
+    ("Dividendo alto",               "SCHD"),
+    ("Dividendo creciente",          "VIG"),
+    ("Bonos agregados EE.UU.",       "BND"),
+    ("Bonos del Tesoro 20+ años",    "TLT"),
+    ("Oro",                          "GLD"),
+    ("Plata",                        "SLV"),
+    ("Innovación disruptiva",        "ARKK"),
+    ("Factor value",                 "VLUE"),
+    ("Factor momentum",              "MTUM"),
+    ("Factor calidad",               "QUAL"),
+    ("Factor mínima volatilidad",    "USMV"),
+]
+
+ETFS_USA = sorted(t for t in ETFS_NO_ANALIZAR if t in TICKERS_USA)
+ACCIONES_USA = [t for t in TICKERS_USA if t not in set(ETFS_USA)]
+
+# Que los dos ambientes sumen la grilla entera: si alguien agrega un ETF a
+# TICKERS_USA y se olvida de ETFS_NO_ANALIZAR, aparece como accion en la
+# pestaña equivocada Y el embudo lo manda a "revisar a mano" para nada. Esto
+# no lo detecta -- eso no se puede automatizar -- pero al menos garantiza
+# que ningun simbolo se pierda ni se cuente dos veces.
+assert len(ETFS_USA) + len(ACCIONES_USA) == len(TICKERS_USA), \
+    "ETFS_USA + ACCIONES_USA no suman TICKERS_USA"
+
+# Y que los tres grupos CON NOMBRE cubran exactamente esos ETF. Esto si
+# detecta el olvido tipico: agregar un ETF a la grilla y a ETFS_NO_ANALIZAR
+# pero no ponerle nombre, con lo que desaparece del ranking de Explorar sin
+# que nada avise. Importar el modulo ya lo caza.
+_ETFS_CON_NOMBRE = [t for _, t in ETFS_SECTOR + ETFS_INDUSTRIA + ETFS_OTROS]
+assert sorted(_ETFS_CON_NOMBRE) == ETFS_USA, (
+    "Los ETF con nombre no calzan con los de la grilla. "
+    "Sin nombre: " + ", ".join(sorted(set(ETFS_USA) - set(_ETFS_CON_NOMBRE))) + ". "
+    "Con nombre pero fuera de la grilla: "
+    + ", ".join(sorted(set(_ETFS_CON_NOMBRE) - set(ETFS_USA))))
+assert len(set(_ETFS_CON_NOMBRE)) == len(_ETFS_CON_NOMBRE), \
+    "Un ETF aparece con nombre en dos grupos a la vez"
 
 # El universo real del analisis: los dos indices MAS la grilla (que trae
 # cosas que no estan en ningun indice y Cristian igual quiere mirar --

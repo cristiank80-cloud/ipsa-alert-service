@@ -88,7 +88,7 @@ BENCHMARK = "SPY"
 # El import va en esta direccion y no al reves: main.py no importa nada, asi
 # que no puede haber circularidad. El formato no cambio -- siguen siendo
 # pares (nombre, ticker) y se usan igual mas abajo.
-from main import ETFS_SECTOR, ETFS_INDUSTRIA
+from main import ETFS_SECTOR, ETFS_INDUSTRIA, ETFS_OTROS
 
 # Umbrales del embudo. Son los del documento; el frontend los puede mandar
 # distintos para explorar, pero estos son el default.
@@ -804,8 +804,45 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     sectores = [x for x in _paralelo(_etf, ETFS_SECTOR) if x]
     _set("Midiendo 12 industrias…", 14)
     industrias = [x for x in _paralelo(_etf, ETFS_INDUSTRIA) if x]
-    for grupo in (sectores, industrias):
+
+    # ---- Paso 1b · el resto de los ETF (23-sep-2026) ----------------------
+    # POR QUE ESTO NO ES UN EMBUDO
+    # ============================
+    # Cristian pidio que Explorar entregue DOS listados, uno de acciones y
+    # otro de ETF. Los siete filtros del metodo no se le pueden aplicar a un
+    # fondo: no tiene capitalizacion bursatil ni crecimiento de utilidades,
+    # que son tres de los siete. Correrselos igual daria lo que ya daba antes
+    # de ETFS_NO_ANALIZAR -- una lista de "sin dato, revisar a mano" que no
+    # lleva a ninguna parte (ver el comentario de esa lista en main.py).
+    #
+    # Lo que SI significa algo en un fondo es la fuerza relativa: si este
+    # sector/indice/metal le esta ganando o perdiendo al S&P 500. Y eso es
+    # exactamente lo que el paso 1 ya calculaba para los 23 de sector e
+    # industria. Asi que el "listado de ETF" no es maquinaria nueva: es ese
+    # mismo ranking, extendido a los 17 que faltaban y devuelto como lista
+    # propia. Cuesta 17 series mas, no una corrida aparte.
+    #
+    # Los 23 no se recalculan: se reusan los objetos de arriba.
+    _set("Midiendo el resto de los ETF…", 17)
+    otros = [x for x in _paralelo(_etf, ETFS_OTROS) if x]
+
+    def _por_fuerza(grupo):
         grupo.sort(key=lambda x: (x["fuerza"].get("m12") is None, -(x["fuerza"].get("m12") or 0)))
+        return grupo
+
+    for grupo in (sectores, industrias, otros):
+        _por_fuerza(grupo)
+
+    # La lista que ve Cristian: TODOS los ETF de la grilla en una sola tabla,
+    # ordenados por fuerza a 12 meses, con la etiqueta de a que grupo
+    # pertenece cada uno. Un solo orden y no tres, porque la pregunta que
+    # contesta es "¿que esta mandando hoy?", y esa se responde comparando el
+    # oro con el software y con los bonos, no cada familia por su cuenta.
+    etfs = _por_fuerza(
+        [dict(x, grupo="sector") for x in sectores]
+        + [dict(x, grupo="industria") for x in industrias]
+        + [dict(x, grupo="otro") for x in otros]
+    )
 
     # ---- Paso 2a · precio, volumen y medias -------------------------------
     # ESTA ERA LA ETAPA LENTA, Y YA NO LO ES.
@@ -1201,6 +1238,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         "umbrales": umbrales,
         "sectores": sectores,
         "industrias": industrias,
+        # El listado de ETF completo (23-sep-2026). `sectores` e `industrias`
+        # se dejan tal cual para no romper el paso 1 del frontend, que los
+        # dibuja aparte; `etfs` es la union ordenada por fuerza, con la
+        # etiqueta de grupo.
+        "etfs": etfs,
         "embudo": {
             "pasos": pasos,
             "conHistorial": len(metricas),

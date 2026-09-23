@@ -51,7 +51,12 @@ from data_source import (get_market_data, get_stats, get_price_history,
                          filtrar_puntos_por_periodo,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
-from main import TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR, SIN_FUNDAMENTALES
+from main import (TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR,
+                  SIN_FUNDAMENTALES, ETFS_USA)
+
+# Set para el `in` de cada ticker en /quotes-usa: la lista es de 40 y el
+# bucle la consulta 213 veces por respuesta.
+_ETFS_USA_SET = set(ETFS_USA)
 
 # Numeros en formato chileno (miles con punto, decimales con coma)
 # para TODO lo que lee una persona -- ver el docstring de formato.py.
@@ -1044,6 +1049,12 @@ def quotes_usa():
             "bid": None, "ask": None, "bidSize": None, "askSize": None,
             "puntasDisponibles": False,
             "esWatchlist": t in watch,
+            # Para que el telefono pueda avisar si su lista de ETF se
+            # desincroniza de la del servidor (23-sep-2026). El frontend
+            # necesita saberlo ANTES de la primera cotizacion -- por eso
+            # tiene su propia copia, ETFS_USA_SET -- pero con esto el
+            # desajuste deja de ser silencioso.
+            "esEtf": t in _ETFS_USA_SET,
         }
 
     indice = pc.get("index")
@@ -1483,81 +1494,43 @@ def run_check():
     _salud["ultimo_error"] = None
 
     stats = st["stats"] or {}
+    # `alertadas` queda vacia siempre desde el 23-sep-2026, pero sigue
+    # existiendo: la respuesta de este endpoint la trae, y el cron de
+    # monitor.yml imprime el JSON completo en su log.
     alertadas = []
 
-    for t in TICKERS:
-        q, s = quotes.get(t), stats.get(t)
-        if not q or not s:
-            continue
-        precio = q["price"]
-        ev = signals.evaluar(t, precio, s, st["indice"])
-        direccion = _direccion_senal(ev)
-        anterior = _alert_state.get(t)
-        _alert_state[t] = direccion
-        # Solo avisa al ENTRAR a una direccion nueva (compra o venta), no en
-        # cada chequeo mientras se mantenga ahi, y no si vuelve a "neutro".
-        if not direccion or direccion == anterior:
-            continue
-
-        # El correo YA NO sale de aca -- se acumula en _alertas_pendientes y
-        # sale consolidado por /enviar-digesto (ver ese endpoint mas abajo).
-        try:
-            notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev))
-        except Exception as e:
-            print(f"[run-check] push {t}: {e}")
-
-        _alertas_pendientes.append({
-            "tipo": "senal", "mercado": "CLP", "ticker": t, "direccion": direccion,
-            "precio": precio, "resumen": signals.describe(ev),
-        })
-
-        alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
-                          "puntaje": ev.get("puntaje") if ev else None,
-                          "banderas": len(ev.get("banderas", [])) if ev else 0,
-                          "mercado": "CLP"})
-
-    # ---- Senales tecnicas (signals.py) para EE.UU. -------------------------
-    # Mismo criterio que el bucle de Chile de arriba (mismo _direccion_senal,
-    # mismo gate candidato_fuerte()), pero sobre TICKERS_USA y con la cache
-    # separada del ambiente 2. A proposito NUNCA se fuerza aca una descarga
-    # bloqueante de 107 historiales dentro del ciclo de peticion (ver el
-    # bloque "POR QUE LAS ACTUALIZACIONES CORREN EN SEGUNDO PLANO" mas
-    # arriba): _refrescar_stats_usa() sin forzar=True solo dispara un
-    # refresco en segundo plano si esta vencida la cache, y este bucle
-    # evalua con lo que YA este en cache ahora mismo (puede quedar vacio los
-    # primeros minutos despues de un despliegue, igual que le pasa hoy a
-    # /signals?mercado=usa).
-    st_usa = _refrescar_stats_usa()
-    _refrescar_precios_usa()
-    stats_usa = st_usa["stats"] or {}
-    quotes_usa_map = _price_cache_usa["quotes"] or {}
-    for t in TICKERS_USA:
-        q, s = quotes_usa_map.get(t), stats_usa.get(t)
-        if not q or not s:
-            continue
-        precio = q["price"]
-        ev = signals.evaluar(t, precio, s, st_usa.get("indice"), moneda="USD")
-        direccion = _direccion_senal(ev)
-        anterior = _alert_state_usa.get(t)
-        _alert_state_usa[t] = direccion
-        if not direccion or direccion == anterior:
-            continue
-
-        # Igual que en el bucle de Chile: el correo se acumula, no se manda aca.
-        try:
-            notify.send_push_alert(t, direccion, precio, s.get("avg90"), signals.describe(ev), mercado="USD")
-        except Exception as e:
-            print(f"[run-check] push {t}: {e}")
-
-        _alertas_pendientes.append({
-            "tipo": "senal", "mercado": "USD", "ticker": t, "direccion": direccion,
-            "precio": precio, "resumen": signals.describe(ev),
-        })
-
-        alertadas.append({"ticker": t, "direccion": direccion, "precio": precio,
-                          "puntaje": ev.get("puntaje") if ev else None,
-                          "banderas": len(ev.get("banderas", [])) if ev else 0,
-                          "mercado": "USD"})
+    # ---- SEÑALES TECNICAS: APAGADAS (23-sep-2026) --------------------------
+    # Aca corrian dos bucles, uno por TICKERS y otro por TICKERS_USA, que
+    # evaluaban signals.py sobre cada accion y mandaban push + correo cuando
+    # una entraba en "posible compra" o "posible venta" (RSI y z-score
+    # extremos a la vez, ver _direccion_senal mas arriba).
+    #
+    # POR QUE SE APAGARON
+    # ===================
+    # Cristian pidio sacar el panel "Distancia a su promedio" de la app
+    # porque no lo usaba, y con el, sus avisos: "las alarmas y correos deben
+    # venir cuando suben o bajan el precio de los ticket que estan en mi
+    # cartera". Es coherente con como trabaja: quien decide QUE comprar es
+    # el embudo de Explorar, y CUANDO, el diagnostico de fase y fuerza. Una
+    # alerta automatica por z-score no participa de ninguna de las dos
+    # decisiones, y llegaba al telefono igual.
+    #
+    # LO QUE SIGUE AVISANDO son los precios objetivo de Mi Cartera (el
+    # bloque de aca abajo): los stops y los objetivos de venta que Cristian
+    # escribe a mano. Esos si son decisiones suyas.
+    #
+    # QUE NO SE TOCO, y por que:
+    #   * `/signals` sigue existiendo y sigue calculandose. No manda nada a
+    #     nadie; lo consume la app para el RSI y para el borde rojo de la
+    #     tarjeta.
+    #   * `_alert_state` y `_alert_state_usa` siguen declarados. Estan
+    #     vacios, pero si algun dia se revive esto, revivirlo sin ellos
+    #     mandaria una avalancha de avisos de golpe la primera vez.
+    #   * `_direccion_senal()` se deja definida: la usan los mismos
+    #     comentarios de signals.py como referencia del umbral vigente.
+    #
+    # Para revivirlo: volver a poner los dos bucles (estan en el historial de
+    # git) justo aca.
 
     # ---- Precios objetivo del usuario ("Mi Cartera") -----------------------
     # Cubre Chile (con los `quotes` recien obtenidos arriba) Y EE.UU. En
@@ -1566,9 +1539,18 @@ def run_check():
     # SEGUNDO PLANO" mas arriba) -- solo se pide que refresque en segundo
     # plano si esta vencida, y se evalua con lo que haya en cache ahora
     # mismo (puede ser de hasta PRICE_CACHE_TTL segundos atras).
-    objetivos_disparados = _evaluar_objetivos(quotes, "CLP")
+    # El refresco de la tanda de EE.UU. lo disparaba antes el bucle de
+    # señales tecnicas, que ya no esta. Va aca: sin esto la cache de EE.UU.
+    # solo se refrescaria cuando alguien abriera la app, y los stops de las
+    # acciones gringas quedarian evaluandose contra precios viejos -- o
+    # contra nada, en un contenedor recien arrancado.
+    st_usa = _refrescar_stats_usa()
     _refrescar_precios_usa()
-    objetivos_disparados += _evaluar_objetivos(_price_cache_usa["quotes"] or {}, "USD")
+    stats_usa = st_usa["stats"] or {}
+    quotes_usa_map = _price_cache_usa["quotes"] or {}
+
+    objetivos_disparados = _evaluar_objetivos(quotes, "CLP")
+    objetivos_disparados += _evaluar_objetivos(quotes_usa_map, "USD")
 
     return jsonify({
         "estado": "ok",
