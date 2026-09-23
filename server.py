@@ -1451,10 +1451,76 @@ def _direccion_senal(ev):
     return None
 
 
+# ---------------------------------------------------------------------------
+# EL PULSO: abrir la app cuenta como un chequeo (23-sep-2026)
+# ---------------------------------------------------------------------------
+# EL PROBLEMA QUE RESUELVE
+# =======================
+# /run-check no corre solo: alguien de afuera tiene que llamarlo. El cron de
+# GitHub Actions no es confiable (ver el comentario largo de monitor.yml) y
+# el 23-sep-2026 el servidor llevaba UN solo chequeo en todo el dia, a las
+# 13:24, con el mercado abierto. Es decir, casi toda la jornada los stops de
+# Cristian no se estaban mirando, y la app se lo decia en una banda roja que
+# no habia forma de apagar porque era cierta.
+#
+# LA IDEA
+# =======
+# Cristian abre la app varias veces al dia. Que ABRIRLA cuente como un
+# chequeo convierte ese habito en la red de seguridad: si el cron falla, sus
+# stops igual se revisan cada vez que mira los precios.
+#
+# NO REEMPLAZA AL CRON, y conviene tenerlo claro: mientras la app este
+# cerrada, nadie revisa nada. Es una red, no el piso.
+#
+# POR QUE ES SEGURO QUE SEA PUBLICO
+# =================================
+# El token sigue siendo obligatorio para todo lo demas. Lo unico que este
+# atajo permite es disparar EL MISMO trabajo que el cron ya hace, y con tres
+# candados:
+#   1. Como maximo una vez cada PULSO_MIN_MINUTOS (10 por defecto), que es
+#      exactamente la frecuencia del cron. Aunque alguien lo llame mil veces,
+#      el trabajo real ocurre a lo mas cada 10 minutos.
+#   2. Solo de lunes a viernes y en horario de bolsa. Fuera de ahi ni
+#      siquiera se evalua.
+#   3. No expone ningun dato: la respuesta es la misma de /run-check, que no
+#      lleva precios de posiciones ni nada del usuario.
+# Lo peor que puede hacer un tercero es mantener el servicio despierto, que
+# es justo lo que queremos.
+PULSO_MIN_MINUTOS = int(os.environ.get("PULSO_MIN_MINUTOS", 10))
+_ultimo_pulso = 0.0
+
+
+def _pulso_permitido():
+    """True si corresponde dejar pasar un /run-check SIN token."""
+    global _ultimo_pulso
+    ahora_chile = datetime.now(TZ_CHILE)
+    if ahora_chile.weekday() >= 5 or ahora_chile.hour not in range(9, 19):
+        return False
+    ahora = time.time()
+    # El reloj que manda es el del ULTIMO CHEQUEO BUENO, no el del ultimo
+    # pulso: si el cron acaba de correr, la app no tiene por que repetirlo.
+    ultimo = _salud.get("ultimo_check_ok")
+    if ultimo:
+        try:
+            visto = datetime.fromisoformat(ultimo)
+            if (datetime.now(timezone.utc) - visto).total_seconds() < PULSO_MIN_MINUTOS * 60:
+                return False
+        except Exception:
+            pass
+    # Y un segundo candado por si el chequeo falla siempre (Yahoo caido):
+    # sin esto, cada apertura volveria a intentar la tanda completa.
+    if ahora - _ultimo_pulso < PULSO_MIN_MINUTOS * 60:
+        return False
+    _ultimo_pulso = ahora
+    return True
+
+
 @app.route("/run-check", methods=["GET", "POST"])
 def run_check():
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
-        return jsonify({"error": "no autorizado"}), 401
+        # Sin token solo pasa el "pulso" de la app -- ver el bloque de arriba.
+        if not _pulso_permitido():
+            return jsonify({"error": "no autorizado"}), 401
 
     _salud["checks_totales"] += 1
     st = _refrescar_stats()
