@@ -110,6 +110,9 @@ _CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
 _COOKIE_URLS = ["https://fc.yahoo.com/", "https://finance.yahoo.com/"]
 _CRUMB_TTL = 3600
 _REFRESCO_MIN = 30   # ver la nota de la estampida en _asegurar_crumb()
+# Si Yahoo NO entrego el crumb, no se vuelve a pedir hasta que pase esto.
+# Ver "EL CRUMB FALLIDO SE PEDIA EN CADA PETICION" en _asegurar_crumb().
+_CRUMB_ESPERA_FALLO = 600
 
 _sesion_yf = None
 _crumb = None
@@ -172,6 +175,16 @@ def _asegurar_crumb(forzar=False):
         if not forzar and _crumb and (ahora - _crumb_ts) < _CRUMB_TTL:
             return _sesion_yf, _crumb
 
+        # EL CRUMB FALLIDO SE PEDIA EN CADA PETICION (24-sep-2026, visto en
+        # produccion: "getcrumb respondio 429"). Con _crumb en None la
+        # condicion de arriba nunca se cumplia, asi que CADA una de las ~66
+        # fichas, cada lote de 40 y cada reintento volvia a pedir cookies +
+        # crumb: hasta 4 peticiones por llamada, justo cuando Yahoo ya estaba
+        # diciendo "demasiadas peticiones". Eso alarga el castigo. Ahora un
+        # fallo se recuerda _CRUMB_ESPERA_FALLO segundos, forzado o no.
+        if _crumb is None and _crumb_ts and (ahora - _crumb_ts) < _CRUMB_ESPERA_FALLO:
+            return _sesion_yf, None
+
         # ESTAMPIDA DE RENOVACIONES. `forzar=True` llega desde el reintento
         # que hace cada peticion cuando recibe 401/403. Si Yahoo esta
         # rechazando el crumb, lo reciben las 127 a la vez: sin este freno,
@@ -213,6 +226,10 @@ def quote_summary(symbol, modules):
     """
     for intento in (0, 1):
         s, crumb = _asegurar_crumb(forzar=(intento == 1))
+        if not crumb:
+            # Sin crumb Yahoo contesta 401 SIEMPRE: pedir igual solo suma
+            # peticiones a una IP que ya esta castigada.
+            return None, f"sin crumb ({_crumb_motivo})"
         params = {"modules": modules}
         if crumb:
             params["crumb"] = crumb
@@ -255,6 +272,10 @@ def _quote_v7_filas(symbols, tam_lote=40):
         conseguido = False
         for intento in (0, 1):
             s, crumb = _asegurar_crumb(forzar=(intento == 1))
+            if not crumb:
+                # Mismo criterio que quote_summary(): sin crumb es 401 seguro.
+                # Se corta el lote entero en vez de gastar una peticion por lote.
+                return filas, sorted(set(motivos + ["sin crumb"]))
             params = {"symbols": ",".join(lote)}
             if crumb:
                 params["crumb"] = crumb

@@ -317,7 +317,88 @@ _MODULOS = "price,financialData,assetProfile"
 # justo lo que Yahoo entrega.
 _TIMESERIES = ("https://query2.finance.yahoo.com/ws/fundamentals-timeseries/"
                "v1/finance/timeseries/{symbol}")
-_TIPOS_TTM = "trailingDilutedEPS,trailingTotalRevenue"
+# trailingMarketCap viaja en la MISMA peticion: es la capitalizacion que
+# Yahoo actualiza a diario en este endpoint, que NO pide crumb. Cuando el crumb
+# esta bloqueado (429 en getcrumb, visto el 24-sep-2026) es la unica fuente
+# de Yahoo para la capitalizacion que sigue viva. Verificado a mano: NVDA
+# trae trailingMarketCap con fecha del dia anterior.
+_TIPOS_TTM = "trailingDilutedEPS,trailingTotalRevenue,trailingMarketCap"
+
+# ---------------------------------------------------------------------------
+# Sector, industria y capitalizacion desde el screener de Nasdaq
+# ---------------------------------------------------------------------------
+# UNA peticion trae ~7.000 acciones de EE.UU. con sector, industria y
+# capitalizacion. No pide cookie ni crumb. Es el respaldo para lo unico que
+# sin crumb de Yahoo no hay otra forma de saber: el sector y la industria
+# (que el paso 5 necesita para no repetir industria).
+#
+# La taxonomia de Nasdaq NO es la de Yahoo. Los sectores se traducen a los
+# nombres de Yahoo (asi el frontend los cruza con los ETF igual que siempre);
+# las industrias se dejan como vienen ("Semiconductors", "Major Banks"...),
+# y cada ficha dice de donde salio con `fuenteSector`.
+_NASDAQ_SCREENER = ("https://api.nasdaq.com/api/screener/stocks"
+                    "?tableonly=true&limit=25&offset=0&download=true")
+_NASDAQ_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/",
+}
+_NASDAQ_SECTOR_A_YAHOO = {
+    "Technology": "Technology", "Finance": "Financial Services",
+    "Health Care": "Healthcare", "Consumer Discretionary": "Consumer Cyclical",
+    "Consumer Staples": "Consumer Defensive", "Energy": "Energy",
+    "Industrials": "Industrials", "Basic Materials": "Basic Materials",
+    "Utilities": "Utilities", "Real Estate": "Real Estate",
+    "Telecommunications": "Communication Services",
+}
+_NASDAQ_TTL = 24 * 3600
+_nasdaq_cache = {"datos": None, "ts": 0, "motivo": "todavia no se ha pedido"}
+_nasdaq_lock = threading.Lock()
+
+
+def screener_nasdaq():
+    """({ticker: {capB, sector, industria, nombre}}, motivo). Cache 24 h.
+    Un fallo tambien se recuerda (1 h) para no repetirlo en cada corrida."""
+    with _nasdaq_lock:
+        ahora = time.time()
+        c = _nasdaq_cache
+        if c["ts"] and (ahora - c["ts"]) < (_NASDAQ_TTL if c["datos"] else 3600):
+            return (c["datos"] or {}), c["motivo"]
+        datos, motivo = None, "?"
+        try:
+            r = requests.get(_NASDAQ_SCREENER, headers=_NASDAQ_HEADERS, timeout=30)
+            if r.status_code != 200:
+                motivo = f"HTTP {r.status_code}"
+            else:
+                filas = ((r.json().get("data") or {}).get("rows") or [])
+                datos = {}
+                for f in filas:
+                    sim = (f.get("symbol") or "").strip().upper().replace("/", "-")
+                    if not sim:
+                        continue
+                    try:
+                        cap = float(f.get("marketCap") or 0)
+                    except (TypeError, ValueError):
+                        cap = 0
+                    sector = _NASDAQ_SECTOR_A_YAHOO.get((f.get("sector") or "").strip())
+                    datos[sim] = {
+                        "capB": round(cap / 1e9, 2) if cap > 0 else None,
+                        "sector": sector,
+                        "industria": (f.get("industry") or "").strip() or None,
+                        "nombre": (f.get("name") or "").strip() or sim,
+                    }
+                motivo = f"ok ({len(datos)} acciones)" if datos else "200 sin filas"
+                if not datos:
+                    datos = None
+        except Exception as e:
+            motivo = f"{type(e).__name__}: {e}"
+        _nasdaq_cache.update(datos=datos, ts=ahora, motivo=motivo)
+        if datos is None:
+            print(f"[explorar] Screener de Nasdaq no disponible: {motivo}")
+        return (datos or {}), motivo
 
 
 def _suma_ttm(valores):
@@ -374,7 +455,7 @@ def _crecimiento_ttm_uno(ticker, con_motivo=False):
 
     series = {}
     for b in bloques:
-        for clave in ("trailingDilutedEPS", "trailingTotalRevenue"):
+        for clave in ("trailingDilutedEPS", "trailingTotalRevenue", "trailingMarketCap"):
             filas = b.get(clave)
             if not filas:
                 continue
@@ -404,6 +485,11 @@ def _crecimiento_ttm_uno(ticker, con_motivo=False):
             continue
         out[destino] = round((actual / anterior - 1) * 100, 1)
         detalle[clave] = "ok"
+
+    # Capitalizacion: el ultimo valor que haya (Yahoo la actualiza a diario).
+    caps = [v for v in (series.get("trailingMarketCap") or []) if isinstance(v, (int, float)) and v > 0]
+    if caps:
+        out["capB"] = round(caps[-1] / 1e9, 2)
 
     motivo = "ok" if out else ("sin datos utilizables · " +
                                " · ".join(f"{k}: {v}" for k, v in detalle.items()))
@@ -510,16 +596,49 @@ def fundamentales(tickers):
     # dice con cual se midio.
     for t, d in datos.items():
         d["crecFuente"] = "trimestral" if isinstance(d.get("crecBpa"), (int, float)) else None
-    ttm, motivos_ttm = crecimiento_ttm(sorted(datos.keys()))
+    # Se pide para TODAS, no solo para las que trajeron ficha. Antes era
+    # `sorted(datos.keys())`: con el crumb bloqueado `datos` quedaba vacio y
+    # el TTM -- que NO necesita crumb y SI funcionaba -- ni se intentaba.
+    ttm, motivos_ttm = crecimiento_ttm(sorted(tickers))
     for t, v in ttm.items():
-        if t not in datos:
+        if not v:
             continue
+        d = datos.setdefault(t, {"capB": None, "crecBpa": None, "crecVentas": None,
+                                  "sector": None, "industria": None, "nombre": t,
+                                  "crecFuente": None})
         if "crecBpa" in v:
-            datos[t]["crecBpa"] = v["crecBpa"]
+            d["crecBpa"] = v["crecBpa"]
         if "crecVentas" in v:
-            datos[t]["crecVentas"] = v["crecVentas"]
-        if v:
-            datos[t]["crecFuente"] = "ttm"
+            d["crecVentas"] = v["crecVentas"]
+        if "crecBpa" in v or "crecVentas" in v:
+            d["crecFuente"] = "ttm"
+        if d.get("capB") is None and isinstance(v.get("capB"), (int, float)):
+            d["capB"] = v["capB"]
+            d["capFuente"] = "timeseries"
+
+    # ---- Respaldo: screener de Nasdaq (sector, industria, capitalizacion) --
+    # Solo rellena lo que falte. Si Yahoo dio el dato, manda Yahoo.
+    nasdaq, motivo_nasdaq = ({}, "no hizo falta")
+    if any(t not in datos or datos[t].get("capB") is None or not datos[t].get("industria")
+           for t in tickers):
+        nasdaq, motivo_nasdaq = screener_nasdaq()
+    rellenos_nasdaq = 0
+    for t in tickers:
+        n = nasdaq.get(t)
+        if not n:
+            continue
+        d = datos.setdefault(t, {"capB": None, "crecBpa": None, "crecVentas": None,
+                                  "sector": None, "industria": None, "nombre": t,
+                                  "crecFuente": None})
+        tocado = False
+        if d.get("capB") is None and n.get("capB") is not None:
+            d["capB"] = n["capB"]; d["capFuente"] = "nasdaq"; tocado = True
+        if not d.get("sector") and not d.get("industria") and (n.get("sector") or n.get("industria")):
+            d["sector"], d["industria"] = n.get("sector"), n.get("industria")
+            d["fuenteSector"] = "nasdaq"; tocado = True
+        if (not d.get("nombre") or d.get("nombre") == t) and n.get("nombre"):
+            d["nombre"] = n["nombre"]
+        rellenos_nasdaq += tocado
 
     con_cap = sum(1 for d in datos.values() if isinstance(d.get("capB"), (int, float)))
     con_crec = sum(1 for d in datos.values() if isinstance(d.get("crecBpa"), (int, float)))
@@ -535,6 +654,8 @@ def fundamentales(tickers):
         "motivosLote": motivos_lote,
         "motivosFicha": motivos_qs,
         "crumb": data_source.estado_crumb(),
+        "nasdaq": {"motivo": motivo_nasdaq, "rellenadas": rellenos_nasdaq},
+        "capPorTimeseries": sum(1 for d in datos.values() if d.get("capFuente") == "timeseries"),
     }
     if con_cap == 0 and tickers:
         print(f"[explorar] NINGUNA de las {len(tickers)} trajo capitalizacion. "
@@ -1195,7 +1316,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # ---- Paso 5 · sin repetir industria -----------------------------------
     vistas, finalistas, descartadas = {}, [], []
     for c in tras_fuerza:
-        ind = c["industria"] or "(industria desconocida)"
+        # Sin industria conocida NO se compara con nadie: antes todas las
+        # desconocidas se juntaban bajo "(industria desconocida)" y solo
+        # sobrevivia la primera -- con el sector caido, eso era casi todo.
+        ind = c["industria"] or f"(sin industria: {c['ticker']})"
         if ind in vistas:
             c = dict(c); c["repiteCon"] = vistas[ind]
             descartadas.append(c)
