@@ -431,6 +431,12 @@ _LEN_VOL_S = 30
 _VOL_MULT_CONFIRMA = 1.3   # FIX: antes 0.8 -- ver cabecera del archivo
 _VOL_MULT_SOSTENIDO = 0.8  # el umbral viejo, ahora solo informativo
 
+# Las tres capas de la fuerza relativa del indicador oficial v5 (Clase 3,
+# laminas 39-41). Informativas: NO cambian la confirmacion 4 ni el score.
+_LEN_MANS_S = 52    # media de la fuerza relativa contra la que se compara (Mansfield)
+_LOOK_LIDER_S = 13  # "lider" = fuerza relativa en su maximo de 13 semanas
+_LOOK_VENT_S = 52   # ventaja acumulada sobre el indice, en puntos porcentuales
+
 
 def _agrupar_semanas(puntos):
     """Agrupa una serie diaria en velas semanales (semana ISO, lunes a
@@ -463,6 +469,84 @@ def _agrupar_semanas(puntos):
             "volume": sum(volumenes) if volumenes else None,
         })
     return semanas
+
+
+def _fuerza_relativa_capas(cierres, fechas, semanas_ref):
+    """Las tres capas de la fuerza relativa del indicador oficial v5 (Clase 3,
+    lamina 40), sobre velas SEMANALES ya cerradas:
+
+      1. pendiente  -- cuanto cambio (accion / referencia) en 13 semanas, en %.
+                       Es la MISMA comparacion que la confirmacion 4; aca se
+                       expone el numero, no solo el si/no.
+      2. lider      -- la fuerza relativa de hoy es la mas alta de 13 semanas.
+      3. mansfield  -- (FR de hoy / su promedio de 52 semanas - 1) * 100.
+                       Sobre 0 le gana a la referencia, bajo 0 le pierde.
+    Mas la ventaja acumulada en 52 semanas, en puntos porcentuales.
+
+    `semanas_ref` es la referencia ya agrupada en semanas: el S&P 500 para la
+    lectura normal, o el ETF del sector para "lidera dentro de su sector".
+    Devuelve disponible=False si falta referencia; cada numero puede venir en
+    None por separado si no alcanza el historial para esa ventana.
+    """
+    n = len(cierres)
+    if not semanas_ref or n < 2:
+        return {"disponible": False}
+    alineado = _alinear_indice_por_fecha(fechas, semanas_ref)
+    rs = [(cierres[i] / alineado[i]) if alineado[i] else None for i in range(n)]
+    hoy = n - 1
+    if rs[hoy] is None:
+        return {"disponible": False}
+
+    pendiente = None
+    if n > _LOOK_RS_S and rs[hoy - _LOOK_RS_S]:
+        pendiente = (rs[hoy] / rs[hoy - _LOOK_RS_S] - 1) * 100
+
+    lider = None
+    cola = rs[-_LOOK_LIDER_S:]
+    if len(cola) == _LOOK_LIDER_S and all(v is not None for v in cola):
+        lider = rs[hoy] >= max(cola)
+
+    def _mans(i):
+        if i < _LEN_MANS_S - 1:
+            return None
+        ventana = rs[i - _LEN_MANS_S + 1:i + 1]
+        if any(v is None for v in ventana):
+            return None
+        prom = sum(ventana) / _LEN_MANS_S
+        return (rs[i] / prom - 1) * 100 if prom else None
+
+    mans_hoy = _mans(hoy)
+    mans_ayer = _mans(hoy - 1) if hoy >= 1 else None
+    cruza = (mans_hoy is not None and mans_ayer is not None
+             and mans_hoy > 0 and mans_ayer <= 0)
+
+    ventaja = None
+    if n > _LOOK_VENT_S and alineado[hoy - _LOOK_VENT_S] and cierres[hoy - _LOOK_VENT_S]:
+        ret_acc = (cierres[hoy] / cierres[hoy - _LOOK_VENT_S] - 1) * 100
+        ret_ref = (alineado[hoy] / alineado[hoy - _LOOK_VENT_S] - 1) * 100
+        ventaja = ret_acc - ret_ref
+
+    r = lambda v: round(v, 1) if v is not None else None
+    return {
+        "disponible": True,
+        "pendiente13SemPct": r(pendiente),
+        "lider13Sem": lider,
+        "mansfield": r(mans_hoy),
+        "cruzaMansfield": cruza,
+        "ventaja52SemPts": r(ventaja),
+    }
+
+
+def fuerza_relativa_vs(puntos, puntos_ref):
+    """Las tres capas contra una referencia CUALQUIERA (serie diaria de la
+    accion y de la referencia, igual que evaluar_semanal). La usa server.py
+    para comparar contra el ETF del sector de la accion."""
+    semanas = _agrupar_semanas(puntos)
+    if len(semanas) < 2:
+        return {"disponible": False}
+    return _fuerza_relativa_capas([s["close"] for s in semanas],
+                                  [s["date"] for s in semanas],
+                                  _agrupar_semanas(puntos_ref))
 
 
 def evaluar_semanal(puntos, puntos_indice=None):
@@ -528,6 +612,7 @@ def evaluar_semanal(puntos, puntos_indice=None):
 
     # ---- Fuerza relativa semanal vs el indice ------------------------------
     rs_up = rs_dn = False
+    semanas_indice = None
     if puntos_indice:
         semanas_indice = _agrupar_semanas(puntos_indice)
         alineado = _alinear_indice_por_fecha(fechas, semanas_indice)
@@ -610,6 +695,8 @@ def evaluar_semanal(puntos, puntos_indice=None):
                          "a5_distribucion": a5},
         "scoreAgotamiento": score_agotamiento,
         "techoConfirmado": techo_confirmado,
+        # Las tres capas de la fuerza relativa vs el indice (v5). Informativo.
+        "fuerzaRelativa": _fuerza_relativa_capas(cierres, fechas, semanas_indice),
         # Fase de CADA semana con dato (no solo la de hoy) -- el array
         # 'fases' ya se calcula completo mas arriba para que la maquina de
         # estados tenga memoria; se expone tal cual para pintar el fondo del

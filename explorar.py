@@ -1089,6 +1089,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "score": dia.get("score") if dia.get("disponible") else None,
             "caso": dia.get("caso"),
             "fuerzaRelativa": dia.get("fuerzaRelativa") or dia.get("fuerza_relativa"),
+            # Mansfield semanal vs S&P 500 (Clase 3, lamina 40). Desempata el
+            # orden de las finalistas: "la fuerza relativa ordena a los que
+            # quedaron". None si no alcanza el historial (52 semanas).
+            "mansfield": ((sem.get("fuerzaRelativa") or {}).get("mansfield")
+                          if sem.get("disponible") else None),
             # Para ir directo a mirarla en TradingView, que es donde Cristian
             # hace el analisis de verdad. Este modulo es la PRIMERA ALERTA.
             "tradingview": f"https://www.tradingview.com/symbols/{t}/",
@@ -1111,6 +1116,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # cB capitalizacion (B) · gB crecimiento BPA · gV crecimiento ventas
     # gF fuente del crecimiento (ttm|trimestral) · f fase · cf confirmaciones
     # sc score 0-8 · fr fuerza relativa (1 sube, 0 no, null no se sabe)
+    # mf Mansfield semanal vs S&P 500 (desempata el orden de las finalistas)
     # se sector · in industria · dg si se le calculo fase/fuerza
     # sf si es un activo SIN_FUNDAMENTALES (Bitcoin): el telefono necesita
     # saberlo para que mover los sliders de capitalizacion/crecimiento no lo
@@ -1138,6 +1144,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "cf": sem.get("scoreConfirmaciones") if sem.get("disponible") else None,
             "sc": dia.get("score") if dia.get("disponible") else None,
             "fr": fr,
+            "mf": ((sem.get("fuerzaRelativa") or {}).get("mansfield")
+                   if sem.get("disponible") else None),
             "se": f.get("sector"),
             "in": f.get("industria"),
             "dg": 1 if t in diags else 0,
@@ -1176,7 +1184,13 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
                                  if isinstance(c["score"], (int, float)) and c["score"] >= 6
                                  and not _pasa_fuerza(c)),
     }
-    tras_fuerza.sort(key=lambda c: (-(c["score"] or 0), c["ticker"]))
+    # Orden: primero el score de 8, y entre las que empatan (casi todas: el
+    # score va de 6 a 8) manda la fuerza relativa de Mansfield -- antes el
+    # desempate era alfabetico, y eso decidia tambien CUAL se quedaba cuando
+    # dos repetian industria. Sin Mansfield va al final de su grupo.
+    tras_fuerza.sort(key=lambda c: (-(c["score"] or 0),
+                                    -(c["mansfield"] if c.get("mansfield") is not None else -1e9),
+                                    c["ticker"]))
 
     # ---- Paso 5 · sin repetir industria -----------------------------------
     vistas, finalistas, descartadas = {}, [], []

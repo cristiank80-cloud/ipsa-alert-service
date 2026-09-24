@@ -52,7 +52,13 @@ from data_source import (get_market_data, get_stats, get_price_history,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
 from main import (TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR,
-                  SIN_FUNDAMENTALES, ETFS_USA)
+                  SIN_FUNDAMENTALES, ETFS_USA, ETFS_SECTOR, ETFS_INDUSTRIA)
+
+# ETF aceptados como "referencia de sector" en /diagnostico?sector=XLK. Solo
+# los 23 de sector e industria: estan todos en la grilla, asi que su serie de
+# 5 años ya se baja igual (cache 24h) y no se abre la puerta a pedir
+# cualquier simbolo por este parametro.
+_ETF_REFERENCIA_SECTOR = {t for _, t in ETFS_SECTOR + ETFS_INDUSTRIA}
 
 # Set para el `in` de cada ticker en /quotes-usa: la lista es de 40 y el
 # bucle la consulta 213 veces por respuesta.
@@ -1187,6 +1193,18 @@ def diagnostico():
 
     diario = indicador_fuerza_fase.evaluar_diario(puntos_5y or [], indice_puntos)
     semanal = indicador_fuerza_fase.evaluar_semanal(puntos_5y or [], indice_puntos)
+
+    # Fuerza relativa contra el ETF de SU sector (Clase 3, lamina 41: "el ETF
+    # de su sector para ver si lidera su industria"). El frontend sabe el
+    # sector de cada accion y manda el ETF; aca solo se valida y se calcula.
+    # Un ETF contra si mismo no dice nada, asi que se omite.
+    etf_sector = request.args.get("sector", "").upper()
+    if (es_usa and semanal.get("disponible") and etf_sector in _ETF_REFERENCIA_SECTOR
+            and etf_sector != ticker):
+        puntos_etf = _serie5y_ticker(etf_sector, True)
+        vs = indicador_fuerza_fase.fuerza_relativa_vs(puntos_5y or [], puntos_etf or [])
+        vs["etf"] = etf_sector
+        semanal["vsSector"] = vs
 
     return jsonify({
         "ticker": ticker,
