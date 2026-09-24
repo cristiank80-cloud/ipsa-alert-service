@@ -71,6 +71,7 @@ import time
 import requests
 
 import data_source
+import fuente_tradingview
 import indicador_fuerza_fase
 
 
@@ -169,6 +170,10 @@ TOPE_DESCARGA_SEG = int(__import__("os").environ.get("EXPLORAR_TOPE_SEG", 6 * 60
 # Se puede apagar con EXPLORAR_USAR_LOTE=0 en Render sin tocar el codigo, por
 # si Yahoo cambia el endpoint y hay que volver al camino viejo con urgencia.
 USAR_LOTE = __import__("os").environ.get("EXPLORAR_USAR_LOTE", "1") != "0"
+# Screener de TradingView como fuente principal del embudo (ver
+# fuente_tradingview.py). Se apaga con EXPLORAR_USAR_TRADINGVIEW=0 en Render:
+# la app vuelve entera al camino de Yahoo + Nasdaq.
+USAR_TRADINGVIEW = __import__("os").environ.get("EXPLORAR_USAR_TRADINGVIEW", "1") != "0"
 TAM_LOTE = int(__import__("os").environ.get("EXPLORAR_TAM_LOTE", 40))
 
 # Cuantas acciones se verifican comparando el numero del lote contra el
@@ -708,8 +713,10 @@ def _comparar_lote(metricas, cuantas=None):
     disparan, se ve en el resultado y ahi se decide.
     """
     cuantas = TOPE_VERIFICAR if cuantas is None else cuantas
+    # "tradingview" tambien se audita: es la fuente nueva y la que menos se
+    # conoce. La muestra se compara contra la serie de Yahoo, igual que el lote.
     del_lote = sorted(t for t, m in metricas.items()
-                      if (m or {}).get("fuente") == "lote")
+                      if (m or {}).get("fuente") in ("lote", "tradingview"))
     if not cuantas or not del_lote:
         return None
     # Las mas liquidas primero: son las que de verdad van a salir como
@@ -841,9 +848,9 @@ def embudo_fundamental(vivos, fund, umbrales, sin_fundamentales=None):
 
     filtrar("capB", umbrales["capB"], f"Capitalización ≥ {umbrales['capB']:g} B",
             "empresas de tamaño real")
-    filtrar("crecBpa", umbrales["crecimiento"], f"BPA trim. YoY ≥ {umbrales['crecimiento']:g} %",
+    filtrar("crecBpa", umbrales["crecimiento"], f"BPA dil. TTM YoY ≥ {umbrales['crecimiento']:g} %",
             "gana más que hace un año")
-    filtrar("crecVentas", umbrales["crecimiento"], f"Ingresos trim. YoY ≥ {umbrales['crecimiento']:g} %",
+    filtrar("crecVentas", umbrales["crecimiento"], f"Ingresos TTM YoY ≥ {umbrales['crecimiento']:g} %",
             "y vende más")
 
     # Una accion que fallo un filtro REAL (dato presente, no alcanza el
@@ -983,7 +990,29 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # cayera entero, `faltan` seria el universo completo y esto se comporta
     # exactamente como antes, presupuesto de tiempo incluido.
     metricas, diag_lote = {}, None
-    if USAR_LOTE:
+
+    # ---- Paso 2a' · TradingView: el mercado completo en una peticion -------
+    # Si responde, trae precio, medias y volumen de ~2.400 acciones (todo
+    # NYSE/Nasdaq/AMEX sobre el piso) y ademas capitalizacion, crecimiento
+    # TTM, sector e industria, que se usan en el paso 2b. El universo pasa a
+    # ser ese mercado MAS el de siempre (lo que TradingView no traiga -- el
+    # bitcoin, por ejemplo -- sigue por Yahoo). Si falla, nada cambia.
+    tv, diag_tv = None, None
+    universo_original = len(universo)
+    if USAR_TRADINGVIEW:
+        _set("Pidiendo el mercado completo al screener de TradingView…", 20)
+        tv, diag_tv = fuente_tradingview.escanear(extra=nucleo or ())
+    if tv:
+        for t, f in tv.items():
+            if f["precio"] and f["sma50"] and f["sma200"]:
+                metricas[t] = {"precio": f["precio"], "sma50": f["sma50"],
+                               "sma200": f["sma200"], "volM": f["volM"],
+                               "capB": f["capB"], "fuente": "tradingview"}
+        universo = sorted(set(universo) | set(metricas))
+        print(f"[explorar] TradingView: {len(metricas)} acciones con precio y "
+              f"medias en {diag_tv.get('segundos')} s. Universo: {len(universo)}.")
+
+    if USAR_LOTE and not tv:
         _set(f"Precio y medias de {len(universo)} acciones, de a "
              f"{TAM_LOTE} por petición…", 20)
         try:
@@ -1048,7 +1077,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # a ciegas sobre 5.000 acciones, se toma una muestra chica y se compara
     # contra el metodo viejo, en la misma corrida. Cuesta unas pocas
     # peticiones y es lo unico que convierte "deberia calzar" en un dato.
-    comparacion = _comparar_lote(metricas) if (USAR_LOTE and metricas) else None
+    comparacion = _comparar_lote(metricas) if ((USAR_LOTE or tv) and metricas) else None
     # CUANTO DEL NUCLEO SE ALCANZO A REVISAR. Es la unica cifra que dice si el
     # resultado se puede comparar con corridas anteriores (y con TradingView
     # restringido a los indices): si el nucleo quedo entero, "0 candidatas"
@@ -1079,7 +1108,9 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
 
     _set(f"{len(metricas)} con historial suficiente. Aplicando filtros de precio y tendencia…", 55)
     detalle_inicio = (
-        f"{len(metricas)} revisadas de {len(universo)} del universo"
+        (f"Mercado completo de EE.UU. vía TradingView ({diag_tv.get('filas')} acciones "
+         f"sobre el piso) + tu universo de {universo_original} · " if tv else "")
+        + f"{len(metricas)} revisadas de {len(universo)} del universo"
         + (f" · el núcleo ({len(nucleo_set)}) quedó "
            + (("entero" + (f", salvo {len(nucleo_sin_datos)} sin datos en Yahoo"
                            if nucleo_sin_datos else ""))
@@ -1101,7 +1132,45 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # sobre el que la app puede mover los umbrales de capitalizacion y
     # crecimiento sin volver a correr nada.
     vivos_tendencia = dict(vivos)
-    fund, diag_fund = fundamentales(sorted(vivos.keys()))
+    if tv:
+        # Lo que TradingView ya trajo no se vuelve a pedir. Solo van a Yahoo /
+        # Nasdaq las que TradingView no tiene o que vinieron sin capitalizacion.
+        # (Crecimiento en blanco en TradingView casi siempre es "base negativa":
+        # Yahoo daria lo mismo, asi que no se gasta una peticion en eso.)
+        fund = {}
+        for t in vivos:
+            f = tv.get(t)
+            if not f:
+                continue
+            fund[t] = {"capB": f["capB"], "crecBpa": f["crecBpa"],
+                       "crecVentas": f["crecVentas"], "sector": f["sector"],
+                       "industria": f["industria"], "nombre": f["nombre"],
+                       "crecFuente": "ttm" if (f["crecBpa"] is not None or f["crecVentas"] is not None) else None,
+                       "capFuente": "tradingview", "fuenteSector": "tradingview"}
+        faltan_f = sorted(t for t in vivos if t not in fund or fund[t].get("capB") is None)
+        if faltan_f:
+            _set(f"Fundamentales de {len(faltan_f)} que TradingView no trajo…", 62)
+            extra_f, diag_fund = fundamentales(faltan_f)
+            for t, d in extra_f.items():
+                dest = fund.setdefault(t, {})
+                for k, v in d.items():
+                    if dest.get(k) is None and v is not None:
+                        dest[k] = v
+        else:
+            diag_fund = {"motivosFicha": {}, "motivosLote": [], "motivosTTM": {},
+                         "crumb": data_source.estado_crumb()}
+        diag_fund = dict(diag_fund)
+        diag_fund.update({
+            "pedidos": len(vivos),
+            "conCapitalizacion": sum(1 for d in fund.values() if isinstance(d.get("capB"), (int, float))),
+            "conCrecimiento": sum(1 for d in fund.values() if isinstance(d.get("crecBpa"), (int, float))),
+            "conCrecimientoTTM": sum(1 for d in fund.values() if d.get("crecFuente") == "ttm"),
+            "pedidasAYahoo": len(faltan_f),
+        })
+    else:
+        fund, diag_fund = fundamentales(sorted(vivos.keys()))
+    diag_fund = dict(diag_fund or {})
+    diag_fund["tradingview"] = diag_tv
     # LA CAPITALIZACION YA VINO GRATIS EN EL LOTE.
     # Es el mismo endpoint que trajo precio y medias, asi que no cuesta ni una
     # peticion extra. Se usa SOLO para rellenar lo que fundamentales() no
@@ -1243,7 +1312,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # saberlo para que mover los sliders de capitalizacion/crecimiento no lo
     # bote del embudo recalculado -- esos tres filtros no se le aplican.
     def _fila(t, m):
-        f = fund.get(t) or {}
+        # Con TradingView, las que no llegaron al paso 2b igual traen
+        # capitalizacion y crecimiento: sirven para que los sliders del
+        # telefono se puedan mover sin "sin dato".
+        f = fund.get(t) or (tv or {}).get(t) or {}
         d = diags.get(t) or {}
         sem, dia = (d.get("semanal") or {}), (d.get("diario") or {})
         frd = dia.get("fuerzaRelativa") or dia.get("fuerza_relativa") or {}
