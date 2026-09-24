@@ -357,7 +357,7 @@ TICKERS_USA = [
     # de Yahoo cada 30 minutos -- separar la pestaña no cuesta nada, lo que
     # cuesta son estos siete simbolos. Si empiezan los 429 y las tarjetas se
     # quedan en "Calculando...", estos son los primeros candidatos a salir.
-    "GLD", "SLV", "TLT", "VIG", "MTUM", "QUAL", "USMV",
+    "GLD", "SLV", "DBC", "TLT", "VIG", "MTUM", "QUAL", "USMV",
 
     # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
@@ -549,7 +549,7 @@ ETFS_NO_ANALIZAR = (
     # Los siete del 23-sep-2026 (ver el bloque de TICKERS_USA). Metales,
     # bonos largos, dividendos crecientes y los tres factores que acompañan
     # a VLUE. Ninguno tiene capitalizacion ni crecimiento de utilidades.
-    + ["GLD", "SLV", "TLT", "VIG", "MTUM", "QUAL", "USMV"]
+    + ["GLD", "SLV", "DBC", "TLT", "VIG", "MTUM", "QUAL", "USMV"]
     # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
     # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
     # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
@@ -599,6 +599,7 @@ ETFS_OTROS = [
     ("Bonos del Tesoro 20+ años",    "TLT"),
     ("Oro",                          "GLD"),
     ("Plata",                        "SLV"),
+    ("Commodities",                  "DBC"),
     ("Innovación disruptiva",        "ARKK"),
     ("Factor value",                 "VLUE"),
     ("Factor momentum",              "MTUM"),
