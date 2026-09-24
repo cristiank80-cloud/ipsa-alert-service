@@ -121,7 +121,7 @@ ETFS_INDUSTRIA = _ETFS_INDUSTRIA_CRUDO
 
 TICKERS_USA = [
     # --- Nucleo de ETF (los 7 que ya estaban) ---
-    "VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD",
+    "VOO", "VTI", "VT", "VXUS", "QQQM", "QQQ", "SCHD",
     "BND",
     # --- 100 acciones grandes de EE.UU. ---
     # Elegidas del catalogo de Racional que me pasaste, priorizando
@@ -542,7 +542,7 @@ NASDAQ100 = [
 # precio todos los dias. Lo que no tiene sentido es evaluarlos con los siete
 # filtros del metodo.
 ETFS_NO_ANALIZAR = (
-    ["VOO", "VTI", "VT", "VXUS", "QQQM", "SCHD", "BND"]   # nucleo de la cartera
+    ["VOO", "VTI", "VT", "VXUS", "QQQM", "QQQ", "SCHD", "BND"]   # nucleo de la cartera
     + ["ARKK"]                                            # gestion activa de tecnologia
     + ["URSP"]                                            # apalancado 2x sobre el S&P equiponderado
     + ["VLUE"]                                            # factor value (22-sep-2026)
@@ -591,7 +591,8 @@ ETFS_OTROS = [
     ("Mercado total EE.UU.",         "VTI"),
     ("Mercado mundial",              "VT"),
     ("Internacional (sin EE.UU.)",   "VXUS"),
-    ("Nasdaq 100",                   "QQQM"),
+    ("Nasdaq 100 (QQQM)",             "QQQM"),
+    ("Nasdaq 100 (QQQ)",              "QQQ"),
     ("S&P 500 equiponderado (2x)",   "URSP"),
     ("Dividendo alto",               "SCHD"),
     ("Dividendo creciente",          "VIG"),
