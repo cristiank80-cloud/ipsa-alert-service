@@ -360,6 +360,19 @@ TICKERS_USA = [
     "GLD", "SLV", "DBC", "TLT", "VIG", "MTUM", "QUAL", "USMV",
 
     # -----------------------------------------------------------------------
+    # AGREGADA A PEDIDO DE CRISTIAN (1-oct-2026)
+    # -----------------------------------------------------------------------
+    #   TEVA -- Teva Pharmaceutical Industries (NYSE, ADR israeli).
+    #           Farmaceutica de genericos. Accion normal: NO es ETF, asi que
+    #           entra sola al embudo de Explorar (no esta en el S&P 500 ni
+    #           en el Nasdaq-100, asi que este es el unico lugar que la mete).
+    #
+    # La grilla pasa de 215 a 216. Como en las veces anteriores, se agrega
+    # sin sacar nada; si aparecen 429 de Yahoo y tarjetas en "Calculando...",
+    # ahi toca recortar.
+    "TEVA",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
