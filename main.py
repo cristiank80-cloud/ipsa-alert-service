@@ -373,6 +373,20 @@ TICKERS_USA = [
     "TEVA",
 
     # -----------------------------------------------------------------------
+    # AGREGADA A PEDIDO DE CRISTIAN (5-oct-2026)
+    # -----------------------------------------------------------------------
+    #   KEYS -- Keysight Technologies (NYSE). Instrumentos de medicion y
+    #           prueba electronica. Accion normal: NO es ETF. Ya estaba en
+    #           el embudo de Explorar por ser del S&P 500 (ver SP500 mas
+    #           abajo); lo nuevo es que ahora tiene TARJETA en la grilla y
+    #           se refresca sola cada ciclo.
+    #
+    # La grilla pasa de 216 a 217. Se agrega sin sacar nada, igual que
+    # TEVA; si aparecen 429 de Yahoo y tarjetas en "Calculando...", ahi
+    # toca recortar.
+    "KEYS",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
