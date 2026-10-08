@@ -22,6 +22,7 @@ aunque nadie fuera a correr `python main.py --loop` nunca.
 # Ambiente 1 (Chile · CLP)
 # ---------------------------------------------------------------------------
 # REDUCIDO A 5 NOMBRES (agosto 2026, a pedido de Cristian).
+# Desde el 8-oct-2026 son 7: volvieron ANDINA-B y CHILE (ver la lista).
 #
 # POR QUE
 # =======
@@ -49,11 +50,16 @@ aunque nadie fuera a correr `python main.py --loop` nunca.
 # revisa que tus posiciones chilenas abiertas sean solo estas cinco.
 TICKERS = [
     "COPEC", "FALABELLA", "RIPLEY", "LTM", "SOCOVESA",
+    # -- Reactivadas a pedido de Cristian (8-oct-2026): Embotelladora Andina
+    #    serie B y Banco de Chile. Estaban comentadas mas abajo desde el
+    #    recorte de agosto; son las mismas dos lineas, descomentadas. Chile
+    #    pasa de 5 a 7 simbolos por ciclo.
+    "ANDINA-B", "CHILE",
     # -- Sacadas del barrido en agosto 2026 (ver comentario de arriba).
     #    Estaban todas verificadas contra Yahoo Finance y funcionaban; se
     #    quitaron por presupuesto de peticiones, no porque fallaran.
-    # "AGUAS-A", "ANDINA-B", "BCI", "BSANTANDER", "CAP", "CCU",
-    # "CENCOSUD", "CHILE", "CMPC", "COLBUN", "CONCHATORO",
+    # "AGUAS-A", "BCI", "BSANTANDER", "CAP", "CCU",
+    # "CENCOSUD", "CMPC", "COLBUN", "CONCHATORO",
     # "ECL", "ENELAM", "ENELCHILE", "ENTEL", "IAM",
     # "MALLPLAZA", "PARAUCO",
     # "SMU", "SONDA", "SQM-B", "VAPORES",
@@ -387,6 +393,35 @@ TICKERS_USA = [
     "KEYS",
 
     # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (8-oct-2026)
+    # -----------------------------------------------------------------------
+    # El pedido traia seis simbolos de EE.UU.: EWJ, FAST, EXPD, DELL, HNGS
+    # y BE. FAST y DELL ya tenian tarjeta desde antes -- no se repiten aca
+    # (repetirlos rompe el assert de mas abajo). "HNGS" no se agrego: no es
+    # un simbolo que se conozca, y lo mas probable es que sea HNGE (Hinge
+    # Health), que ya esta en la grilla desde el 27-ago-2026. Estos tres
+    # son los que faltaban de verdad:
+    #
+    #   EXPD -- Expeditors International of Washington (NYSE). Logistica y
+    #           agenciamiento de carga. Accion normal: NO es ETF. Ya estaba
+    #           en el embudo de Explorar por ser del S&P 500; lo nuevo es la
+    #           TARJETA en la grilla.
+    #   BE   -- Bloom Energy (NYSE). Celdas de combustible para generacion
+    #           electrica en sitio. Accion normal: NO es ETF. No es del
+    #           S&P 500 ni del Nasdaq-100, asi que este es el unico lugar
+    #           que la mete al embudo.
+    #   EWJ  -- iShares MSCI Japan ETF (NYSE Arca). Es ETF, asi que ADEMAS
+    #           va a ETFS_NO_ANALIZAR y a ETFS_OTROS mas abajo. Es de PAIS,
+    #           no de sector ni de industria: NO va en ETFS_SECTOR ni en
+    #           ETFS_INDUSTRIA. Es el primer ETF de un solo pais de la
+    #           grilla (VXUS es todo el mundo menos EE.UU.).
+    #
+    # La grilla pasa de 217 a 220 (43 ETF). Se agrega sin sacar nada, igual
+    # que TEVA y KEYS; si aparecen 429 de Yahoo y tarjetas en
+    # "Calculando...", ahi toca recortar.
+    "EXPD", "BE", "EWJ",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
@@ -577,6 +612,7 @@ ETFS_NO_ANALIZAR = (
     # bonos largos, dividendos crecientes y los tres factores que acompañan
     # a VLUE. Ninguno tiene capitalizacion ni crecimiento de utilidades.
     + ["GLD", "SLV", "DBC", "TLT", "VIG", "MTUM", "QUAL", "USMV"]
+    + ["EWJ"]                                             # pais: Japon (8-oct-2026)
     # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
     # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
     # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
@@ -618,6 +654,7 @@ ETFS_OTROS = [
     ("Mercado total EE.UU.",         "VTI"),
     ("Mercado mundial",              "VT"),
     ("Internacional (sin EE.UU.)",   "VXUS"),
+    ("Japón",                        "EWJ"),
     ("Nasdaq 100 (QQQM)",             "QQQM"),
     ("Nasdaq 100 (QQQ)",              "QQQ"),
     ("S&P 500 equiponderado (2x)",   "URSP"),
