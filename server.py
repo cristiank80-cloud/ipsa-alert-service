@@ -60,6 +60,12 @@ from main import (TICKERS, TICKERS_USA, UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR,
 # cualquier simbolo por este parametro.
 _ETF_REFERENCIA_SECTOR = {t for _, t in ETFS_SECTOR + ETFS_INDUSTRIA}
 
+# Forma valida de un simbolo pedido desde la app (letras, numeros, punto y
+# guion: BRK-B, BTC-USD). Filtro barato antes de salir a Yahoo por algo que
+# no puede ser un ticker.
+import re as _re
+_SIMBOLO_OK = _re.compile(r"[A-Z0-9][A-Z0-9.\-]{0,14}")
+
 # Set para el `in` de cada ticker en /quotes-usa: la lista es de 40 y el
 # bucle la consulta 213 veces por respuesta.
 _ETFS_USA_SET = set(ETFS_USA)
@@ -176,6 +182,12 @@ _reportes_cache = {"usa": {"data": None, "ts": 0}}
 # PLANO" mas arriba -- esto es deliberadamente distinto porque es un solo
 # simbolo, poco frecuente (un usuario abriendo un detalle a la vez).
 DIAGNOSTICO_CACHE_TTL = 24 * 3600
+# Una descarga FALLIDA (Yahoo con 429, timeout, serie vacia) se recuerda
+# solo 10 minutos, no 24 h. Antes se guardaba igual que una buena: un solo
+# tropiezo de Yahoo dejaba "Fuerza" y "Weinstein" sin datos para ese ticker
+# el dia entero. 10 min sigue sirviendo de freno: no se reintenta en cada
+# apertura del detalle.
+DIAGNOSTICO_FALLO_TTL = 10 * 60
 _serie5y_cache = {}  # ticker -> {"puntos": [...], "ts": epoch}
 
 # Indice de referencia para la fuerza relativa del diagnostico, TAMBIEN de
@@ -190,8 +202,10 @@ _indice5y_cache = {"chile": {"puntos": None, "ts": 0}, "usa": {"puntos": None, "
 def _serie5y_ticker(ticker, es_usa):
     ahora = time.time()
     c = _serie5y_cache.get(ticker)
-    if c is not None and (ahora - c["ts"]) <= DIAGNOSTICO_CACHE_TTL:
-        return c["puntos"]
+    if c is not None:
+        ttl = DIAGNOSTICO_CACHE_TTL if c["puntos"] else DIAGNOSTICO_FALLO_TTL
+        if (ahora - c["ts"]) <= ttl:
+            return c["puntos"]
     puntos = get_price_history(ticker, "5y", suffix=("" if es_usa else None))
     _serie5y_cache[ticker] = {"puntos": puntos, "ts": ahora}
     return puntos
@@ -1175,10 +1189,25 @@ def diagnostico():
     abre por primera vez el detalle de un ticker que nunca se habia
     consultado -- ver _serie5y_ticker() mas arriba).
     """
-    ticker = request.args.get("ticker", "").upper()
+    ticker = request.args.get("ticker", "").upper().strip()
     es_usa = ticker in TICKERS_USA
     if ticker not in TICKERS and not es_usa:
-        return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+        # Antes aca se rechazaba todo lo que no estuviera en la grilla. Pero
+        # el detalle tambien se abre para la watchlist ("A seguir") y para
+        # acciones sueltas de Explorar (ver /accion), y ahi "Fuerza" y
+        # "Weinstein" se quedaban en "cargando..." para siempre con un 400
+        # que nadie veia. Paso con IOT y APH (oct-2026): estaban en la app
+        # pero no en el main.py del servidor. Ahora se usa el MISMO criterio
+        # que /accion y /diagnostico-lote: universo conocido + watchlist, y
+        # si el mercado completo todavia no se bajo (reinicio de Render), se
+        # deja pasar y decide Yahoo -- un simbolo inexistente vuelve con
+        # "disponible": false y su motivo, no con datos inventados.
+        conocido = (ticker in _universo_conocido()
+                    or ticker in _leer_watchlist()
+                    or not _mercado_completo_listo())
+        if not _SIMBOLO_OK.fullmatch(ticker or "") or not conocido:
+            return jsonify({"error": f"ticker '{ticker}' no reconocido"}), 400
+        es_usa = True  # todo lo que no es de la grilla chilena es de EE.UU.
 
     mercado = "usa" if es_usa else "chile"
 
