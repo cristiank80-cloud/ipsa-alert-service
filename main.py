@@ -422,6 +422,38 @@ TICKERS_USA = [
     "EXPD", "BE", "EWJ",
 
     # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (9-oct-2026)
+    # -----------------------------------------------------------------------
+    # El pedido decia "OIT y APH". "OIT" no es un simbolo que se conozca; se
+    # asume IOT (Samsara), que es la que esta en el analisis del 9-oct.
+    #
+    #   APH -- Amphenol (NYSE). Conectores y sensores electronicos. Accion
+    #          normal: NO es ETF. Ya estaba en el embudo de Explorar por ser
+    #          del S&P 500; lo nuevo es la TARJETA en la grilla.
+    #   IOT -- Samsara (NYSE). Plataforma de IoT para operaciones fisicas.
+    #          Accion normal: NO es ETF. No es del S&P 500 ni del
+    #          Nasdaq-100, asi que este es el unico lugar que la mete al
+    #          embudo. Salio a bolsa en dic-2021: tiene historial de sobra.
+    #
+    # La grilla pasa de 220 a 222. Se agrega sin sacar nada, igual que TEVA,
+    # KEYS y los de EXPD; si aparecen 429 de Yahoo y tarjetas en
+    # "Calculando...", ahi toca recortar.
+    "APH", "IOT",
+
+    # -----------------------------------------------------------------------
+    # AGREGADA A PEDIDO DE CRISTIAN (29-oct-2026)
+    # -----------------------------------------------------------------------
+    #   CNC -- Centene (NYSE). Seguros de salud administrados (Medicaid,
+    #          Medicare, mercado de la ACA). Accion normal: NO es ETF. Ya
+    #          estaba en el embudo de Explorar por ser del S&P 500; lo nuevo
+    #          es la TARJETA en la grilla.
+    #
+    # La grilla pasa de 222 a 223. Igual que las anteriores, se agrega sin
+    # sacar nada; si aparecen 429 de Yahoo y tarjetas en "Calculando...",
+    # ahi toca recortar.
+    "CNC",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
