@@ -48,6 +48,7 @@ from flask_cors import CORS
 
 from data_source import (get_market_data, get_stats, get_price_history,
                          get_rango_5y, get_proximos_reportes,
+                         proximos_reportes_con_respaldo,
                          filtrar_puntos_por_periodo,
                          simbolos_en_cuarentena,
                          market_caps, estado_crumb)
@@ -443,12 +444,43 @@ def _refrescar_reportes_usa():
     if cache["data"] is not None and (ahora - cache["ts"]) <= REPORTES_CACHE_TTL:
         return cache
 
+    # 30-oct-2026 (Clases Acciones USA, condicion 4): Yahoo le niega el crumb
+    # a Render desde septiembre y esto venia siempre vacio. Ahora cae a
+    # TradingView y despues a Nasdaq (ver proximos_reportes_con_respaldo).
+    # Se piden la grilla, la watchlist y lo que tengas en "Esperando entrada"
+    # o en cartera (los objetivos), SIN los ETF y sin cripto: no reportan, y
+    # mandarlos solo alarga la busqueda en Nasdaq.
     def _trabajo():
-        data = get_proximos_reportes(TICKERS_USA, suffix="")
+        objetivos_usd = [t for t, o in _leer_objetivos().items() if (o or {}).get("mercado") == "USD"]
+        pedir = [t for t in dict.fromkeys(TICKERS_USA + _leer_watchlist() + objetivos_usd)
+                 if t not in _ETFS_USA_SET and not t.endswith("-USD")]
+        data, diag = proximos_reportes_con_respaldo(pedir)
+        _reportes_diag.update(diag, ts=datetime.now(timezone.utc).isoformat())
         if data:
             cache.update({"data": data, "ts": time.time()})
+        else:
+            # Nadie contesto: no se pisa lo que habia, y se reintenta en
+            # 30 minutos en vez de esperar las 12 horas del TTL.
+            cache["ts"] = time.time() - REPORTES_CACHE_TTL + 1800
     _en_segundo_plano("reportes_usa", _trabajo)
     return cache
+
+
+_reportes_diag = {}
+
+
+def _reporte_de(ticker):
+    """Proximo reporte de `ticker` desde la cache, sin bloquear nunca: si la
+    cache esta vencida, pide el refresco en segundo plano y contesta con lo
+    que haya (o None)."""
+    return (_refrescar_reportes_usa()["data"] or {}).get(ticker)
+
+
+def _campos_clase(s):
+    """Los niveles de la clase que calcula data_source.niveles_clase(), tal
+    cual llegan en las estadisticas de la accion. Un solo lugar para los tres
+    payloads de cotizacion (/quotes, /accion, /quotes-usa)."""
+    return {k: s.get(k) for k in ("max30sem", "min10", "volUlt", "volPen")}
 
 
 # --------------------------------------------------------------------------
@@ -651,6 +683,16 @@ def list_subscriptions():
     return jsonify(_leer_subs())
 
 
+def _num_par(d, a, b):
+    """{"a": x, "b": y} con dos numeros positivos y a <= b, o None."""
+    if not isinstance(d, dict):
+        return None
+    x, y = d.get(a), d.get(b)
+    if not (isinstance(x, (int, float)) and isinstance(y, (int, float))) or x <= 0 or y < x:
+        return None
+    return {a: float(x), b: float(y)}
+
+
 @app.route("/alertas-precio", methods=["POST"])
 def guardar_alertas_precio():
     """
@@ -676,13 +718,29 @@ def guardar_alertas_precio():
         sube = obj.get("sube")
         baja = obj.get("baja")
         mercado = obj.get("mercado") if obj.get("mercado") in ("CLP", "USD") else None
-        if sube is None and baja is None:
+        # Clases Acciones USA (30-oct-2026), dos campos opcionales mas:
+        #   zona: {"desde", "hasta"} -- "Esperando entrada" en modo ruptura.
+        #         Se evalua UNA vez al dia, con el cierre (ver _tareas_al_cierre).
+        #   pos:  {"compra", "desde"} -- posicion abierta: costo promedio y
+        #         fecha de inicio, para avisar al cierre si el stop puede subir.
+        zona = _num_par(obj.get("zona"), "desde", "hasta")
+        pos = obj.get("pos") if isinstance(obj.get("pos"), dict) else None
+        if pos is not None:
+            compra = pos.get("compra")
+            desde = pos.get("desde")
+            pos = ({"compra": float(compra), "desde": str(desde)[:10]}
+                   if isinstance(compra, (int, float)) and compra > 0 and isinstance(desde, str) else None)
+        if sube is None and baja is None and zona is None and pos is None:
             continue  # sin objetivo activo, no hay nada que guardar/chequear
         limpio[ticker] = {
             "sube": float(sube) if isinstance(sube, (int, float)) else None,
             "baja": float(baja) if isinstance(baja, (int, float)) else None,
             "mercado": mercado,
         }
+        if zona is not None:
+            limpio[ticker]["zona"] = zona
+        if pos is not None:
+            limpio[ticker]["pos"] = pos
 
     try:
         with open(OBJETIVOS_FILE, "w") as f:
@@ -830,6 +888,8 @@ def quotes():
             "sma100": s.get("sma100"),
             "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
+            # Zona de compra, stop y volumen de la clase (30-oct-2026).
+            **_campos_clase(s),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
             "montoMedioDiario30d": s.get("montoMedioDiario30d"),
@@ -975,6 +1035,8 @@ def accion():
             "sma100": s.get("sma100"),
             "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
+            # Zona de compra, stop y volumen de la clase (30-oct-2026).
+            **_campos_clase(s),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
             "montoMedioDiario30d": s.get("montoMedioDiario30d"),
@@ -982,6 +1044,7 @@ def accion():
             "puntasDisponibles": False,
             # No es de la grilla ni de la watchlist: es una consulta suelta.
             "esFichaSuelta": True,
+            "proximoReporte": _reporte_de(ticker),
         },
         "currency": q.get("currency") or "USD",
         "enGrilla": ticker in TICKERS_USA,
@@ -1063,12 +1126,15 @@ def quotes_usa():
             "sma100": s.get("sma100"),
             "ema21": s.get("ema21"),
             "sma200": s.get("sma200"),
+            # Zona de compra, stop y volumen de la clase (30-oct-2026).
+            **_campos_clase(s),
             "zscore": round(s["zscore"], 2) if s.get("zscore") is not None else None,
             "volDiaria": s.get("volDiaria"),
             "montoMedioDiario30d": s.get("montoMedioDiario30d"),
             "bid": None, "ask": None, "bidSize": None, "askSize": None,
             "puntasDisponibles": False,
             "esWatchlist": t in watch,
+            "proximoReporte": _reporte_de(t),
             # Para que el telefono pueda avisar si su lista de ETF se
             # desincroniza de la del servidor (23-sep-2026). El frontend
             # necesita saberlo ANTES de la primera cotizacion -- por eso
@@ -1562,6 +1628,363 @@ def _pulso_permitido():
     return True
 
 
+# ==========================================================================
+# AVISOS DE LA CLASE: AL CIERRE Y SEMANALES  (Clases Acciones USA, 30-oct-2026)
+# ==========================================================================
+# Lo que eligio Cristian, todo por push Y por correo:
+#
+#   AL CIERRE de Nueva York (una vez por dia habil):
+#     * "cerro dentro de su zona" -- Esperando entrada en modo ruptura.
+#     * el mercado paso de sano a debil o al reves (VOO vs su media 200).
+#     * tu stop puede subir -- stop inicial de la clase o stop movil del 7 %.
+#   SEMANALES (el lunes, con la semana del viernes ya cerrada):
+#     * entra en fase 2 con 4 o mas confirmaciones.
+#     * techo confirmado, o entra en fase 4 (las dos senales de salida).
+#
+# QUIEN LO DISPARA: /run-check, que el cron ya llama cada 10 minutos hasta las
+# 22:00 UTC. No hay cron nuevo. Cada llamada solo pregunta "¿ya toca y todavia
+# no se hizo?"; el trabajo corre en segundo plano (_en_segundo_plano) para no
+# alargar la respuesta al cron.
+#
+# NADA DE ESTO MIRA EL PRECIO INTRADIA. La zona se evalua con el cierre, que
+# es lo que pide la clase ("el precio intradia no cuenta"). Por eso:
+#   * espera a las 16:15 de Nueva York (CIERRE_MIN_DESPUES), y
+#   * pide precios frescos DENTRO del trabajo (get_market_data), en vez de
+#     confiar en una cache que puede ser de antes de la campana.
+#   * Un feriado de la bolsa se reconoce solo: la cotizacion de VOO trae la
+#     fecha del ultimo dia que opero, y si no es hoy, hoy no hubo cierre.
+#
+# ESTADO: CLASE_ESTADO_FILE recuerda que dia/semana ya se hizo y el ultimo
+# stop propuesto por accion (para no repetir el mismo aviso cada tarde). Vive
+# en el disco efimero de Render: si el servicio se reinicia a mitad de una
+# tarde, el aviso de ese dia puede llegar dos veces. Es el costo de no tener
+# base de datos; perder un aviso seria peor que repetirlo.
+TZ_NY = ZoneInfo("America/New_York")
+CLASE_ESTADO_FILE = os.environ.get("CLASE_ESTADO_FILE", "avisos_clase.json")
+CIERRE_MIN_DESPUES = int(os.environ.get("CIERRE_MIN_DESPUES", 15))
+MERCADO_REF = "VOO"
+_clase_lock = threading.Lock()
+_clase_ultimo = {"cierre": None, "semana": None}   # resumen de la ultima corrida, para /avisos-clase
+
+
+def _leer_estado_clase():
+    try:
+        with open(CLASE_ESTADO_FILE) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _guardar_estado_clase(d):
+    try:
+        with open(CLASE_ESTADO_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+    except Exception as e:
+        print(f"[avisos-clase] no se pudo guardar el estado: {e}")
+
+
+def _fecha_en(iso, tz):
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).astimezone(tz).date()
+    except Exception:
+        return None
+
+
+def _ceil_precio(v, mercado):
+    """Hacia ARRIBA: entero en CLP, dos decimales en USD. Igual que la app
+    (Math.ceil), para que el stop del aviso y el de Mi Cartera sean el mismo."""
+    import math
+    return float(math.ceil(v)) if mercado == "CLP" else math.ceil(v * 100) / 100
+
+
+def _fmt_precio(v, mercado):
+    return (f"US${formato.num(v, 2)}" if mercado == "USD" else f"${formato.num(v, 0)}")
+
+
+def stop_propuesto_clase(serie, compra, desde, precio_hoy, mercado):
+    """
+    El stop que la app le propone a una posicion abierta. MISMA cuenta que
+    stopPropuestoPosicion() en el frontend -- si cambia una, cambia la otra.
+
+      stop inicial (clase) = el mas alto entre el minimo intradia de las 10
+                             sesiones que terminan el dia de la compra y
+                             compra - 7 %.
+      stop movil (Cristian) = 7 % bajo el mayor entre la compra, el cierre
+                              mas alto desde la compra y el precio de hoy.
+      propuesto = el mas alto de los dos. Nunca baja (eso lo controla quien
+                  compara contra el stop guardado).
+    """
+    hasta_compra = [p for p in serie if p["date"][:10] <= desde]
+    ult10 = hasta_compra[-10:]
+    min10 = (min(p["low"] if p.get("low") is not None else p["close"] for p in ult10)
+             if len(ult10) == 10 else None)
+    stop_ini = max(min10 if min10 is not None else 0.0, compra * 0.93)
+    cierres = [p["close"] for p in serie if p["date"][:10] >= desde and p.get("close")]
+    ref = max([compra] + cierres + ([precio_hoy] if precio_hoy else []))
+    movil = ref * 0.93
+    bruto = max(stop_ini, movil)
+    return _ceil_precio(bruto, mercado), {
+        "stopInicial": round(stop_ini, 4), "min10Compra": min10, "maxDesdeCompra": ref,
+        "manda": "clase" if stop_ini >= movil else "movil",
+    }
+
+
+def _avisar(titulo, lineas_push, asunto, cuerpo, enviar):
+    """Un push (resumen) y un correo (detalle). Devuelve lo que se mando."""
+    if not enviar:
+        return {"push": None, "correo": None}
+    out = {}
+    try:
+        enviados, fallidos, _ = notify.enviar_push({
+            "title": titulo, "body": "\n".join(lineas_push)[:400], "url": notify.FRONTEND_URL})
+        out["push"] = enviados
+    except Exception as e:
+        out["push"] = f"error: {e}"
+    try:
+        out["correo"] = notify.send_raw_email(asunto, cuerpo)
+    except Exception as e:
+        out["correo"] = f"error: {e}"
+    return out
+
+
+def _tareas_al_cierre(enviar=True, forzar=False):
+    """Los tres avisos al cierre. Devuelve un resumen (tambien en dry-run)."""
+    ahora_ny = datetime.now(TZ_NY)
+    hoy = ahora_ny.date()
+    estado = _leer_estado_clase()
+    res = {"fecha": hoy.isoformat(), "zona": [], "mercado": None, "stops": [], "omitido": None}
+
+    if not forzar:
+        if hoy.weekday() >= 5:
+            res["omitido"] = "fin de semana"; return res
+        if (ahora_ny.hour * 60 + ahora_ny.minute) < 16 * 60 + CIERRE_MIN_DESPUES:
+            res["omitido"] = "todavia no cierra Nueva York"; return res
+        if estado.get("cierre") == hoy.isoformat():
+            res["omitido"] = "ya se hizo hoy"; return res
+
+    objetivos = _leer_objetivos()
+    usd = sorted({t for t, o in objetivos.items() if (o or {}).get("mercado") == "USD"} | {MERCADO_REF})
+    clp = sorted(t for t, o in objetivos.items() if (o or {}).get("mercado") == "CLP")
+    q_usd, _ = get_market_data(usd, suffix="")
+    q_clp, _ = get_market_data(clp) if clp else ({}, None)
+    q_usd, q_clp = q_usd or {}, q_clp or {}
+
+    voo = q_usd.get(MERCADO_REF)
+    if not voo:
+        res["omitido"] = "sin precio de VOO: se reintenta en la proxima revision"; return res
+    if _fecha_en(voo.get("marketTime"), TZ_NY) != hoy and not forzar:
+        # Feriado de la NYSE: no hubo cierre hoy. Se marca como hecho.
+        estado["cierre"] = hoy.isoformat(); _guardar_estado_clase(estado)
+        res["omitido"] = "feriado en Nueva York (VOO no opero hoy)"; return res
+
+    hoy_cl = datetime.now(TZ_CHILE).date()
+    stats_usa = (_stats_cache_usa.get("stats") or {})
+    stats_cl = (_stats_cache.get("stats") or {})
+
+    # ---- 1. Zona de compra -------------------------------------------------
+    for t, o in objetivos.items():
+        zona = (o or {}).get("zona")
+        if not zona:
+            continue
+        mercado = o.get("mercado") or "USD"
+        q = (q_usd if mercado == "USD" else q_clp).get(t)
+        if not q or not isinstance(q.get("price"), (int, float)):
+            continue
+        tz = TZ_NY if mercado == "USD" else TZ_CHILE
+        if _fecha_en(q.get("marketTime"), tz) != (hoy if mercado == "USD" else hoy_cl):
+            continue  # ese mercado no opero hoy
+        p = q["price"]
+        if zona["desde"] <= p <= zona["hasta"]:
+            st = (stats_usa if mercado == "USD" else stats_cl).get(t) or {}
+            vol = st.get("volUlt") if (st.get("volUlt") or {}).get("fecha") == hoy.isoformat() else None
+            res["zona"].append({
+                "ticker": t, "mercado": mercado, "cierre": p, "desde": zona["desde"], "hasta": zona["hasta"],
+                "volVeces": round(vol["vol"] / vol["prom50"], 2) if vol and vol.get("prom50") else None,
+            })
+
+    # ---- 2. Mercado sano <-> debil ------------------------------------------
+    serie_voo = ((_stats_cache_usa.get("series") or {}).get(MERCADO_REF)
+                 or _serie5y_ticker(MERCADO_REF, True) or [])
+    previos = [x["close"] for x in serie_voo if x["date"][:10] < hoy.isoformat() and x.get("close")]
+    if len(previos) >= 200:
+        sma_ayer = sum(previos[-200:]) / 200
+        sma_hoy = (sum(previos[-199:]) + voo["price"]) / 200
+        ayer_sano, hoy_sano = previos[-1] > sma_ayer, voo["price"] > sma_hoy
+        res["mercado"] = {"sano": hoy_sano, "cambio": ayer_sano != hoy_sano,
+                          "cierre": voo["price"], "sma200": round(sma_hoy, 2)}
+
+    # ---- 3. Tu stop puede subir --------------------------------------------
+    ultimos = estado.get("stopsAvisados") or {}
+    for t, o in objetivos.items():
+        pos = (o or {}).get("pos")
+        if not pos or t.endswith("-USD"):
+            continue
+        mercado = o.get("mercado") or "USD"
+        q = (q_usd if mercado == "USD" else q_clp).get(t)
+        precio = q.get("price") if q else None
+        if not isinstance(precio, (int, float)):
+            continue
+        try:
+            serie = _serie5y_ticker(t, mercado == "USD") or []
+        except Exception:
+            serie = []
+        if not serie:
+            continue
+        prop, det = stop_propuesto_clase(serie, pos["compra"], pos["desde"], precio, mercado)
+        actual = o.get("baja")
+        if prop >= precio:
+            continue  # el propuesto quedo sobre el precio: eso no es un stop, es una salida
+        if actual is not None and prop <= actual + 1e-9:
+            continue  # ya esta ahi o mas arriba: el stop nunca baja
+        if ultimos.get(t) == prop:
+            continue  # ya se aviso este mismo numero
+        res["stops"].append(dict(det, ticker=t, mercado=mercado, propuesto=prop, actual=actual, precio=precio))
+
+    # ---- Avisar ------------------------------------------------------------
+    lineas_push, cuerpo = [], [f"Cierre de Nueva York · {hoy.strftime('%d/%m/%Y')}", ""]
+    for z in res["zona"]:
+        lineas_push.append(f"{z['ticker']} cerró dentro de su zona ({_fmt_precio(z['cierre'], z['mercado'])})")
+        cuerpo.append(f"ZONA DE COMPRA · {z['ticker']} cerró en {_fmt_precio(z['cierre'], z['mercado'])}, "
+                      f"dentro de {_fmt_precio(z['desde'], z['mercado'])} – {_fmt_precio(z['hasta'], z['mercado'])}."
+                      + (f" Volumen {formato.num(z['volVeces'], 1)}× su promedio de 50 días." if z.get("volVeces") else ""))
+    if res["zona"]:
+        cuerpo += ["  Antes de comprar revisa las cinco condiciones en A seguir.", ""]
+    m = res["mercado"]
+    if m and m["cambio"]:
+        palabra = "sano" if m["sano"] else "débil"
+        lineas_push.append(f"Mercado {palabra}: VOO cerró {'sobre' if m['sano'] else 'bajo'} su media de 200 días")
+        cuerpo += [f"MERCADO · pasó a {palabra.upper()}: VOO cerró en US${formato.num(m['cierre'], 2)}, "
+                   f"su media de 200 días va en US${formato.num(m['sma200'], 2)}."
+                   + ("" if m["sano"] else " Según la clase, así no se abren compras nuevas."), ""]
+    for s_ in res["stops"]:
+        base = ("el mínimo de las 2 semanas antes de tu compra (stop de la clase)"
+                if s_["manda"] == "clase" else
+                f"7 % bajo el máximo desde tu compra ({_fmt_precio(s_['maxDesdeCompra'], s_['mercado'])})")
+        lineas_push.append(f"{s_['ticker']}: tu stop puede subir a {_fmt_precio(s_['propuesto'], s_['mercado'])}")
+        cuerpo.append(f"STOP · {s_['ticker']}: puede subir a {_fmt_precio(s_['propuesto'], s_['mercado'])}"
+                      + (f" (hoy en {_fmt_precio(s_['actual'], s_['mercado'])})" if s_["actual"] is not None else " (no tiene stop)")
+                      + f". Manda {base}. La app no lo mueve sola: tócalo en Mi Cartera.")
+    if res["stops"]:
+        cuerpo.append("")
+
+    if lineas_push:
+        n = len(lineas_push)
+        cuerpo += [f"👉 Abrir la app: {notify.FRONTEND_URL}", "", signals.DESCARGO]
+        res["envio"] = _avisar(f"Cierre NY · {n} aviso{'s' if n != 1 else ''}", lineas_push,
+                               f"IPSA Monitor · cierre de Nueva York · {n} aviso{'s' if n != 1 else ''}",
+                               "\n".join(cuerpo), enviar)
+
+    if enviar:
+        for s_ in res["stops"]:
+            ultimos[s_["ticker"]] = s_["propuesto"]
+        estado["stopsAvisados"] = ultimos
+        estado["cierre"] = hoy.isoformat()
+        _guardar_estado_clase(estado)
+    return res
+
+
+def _tareas_semanales(enviar=True, forzar=False):
+    """Los avisos semanales del indicador, con la semana del viernes cerrada."""
+    ahora_ny = datetime.now(TZ_NY)
+    semana = "%d-W%02d" % ahora_ny.date().isocalendar()[:2]
+    estado = _leer_estado_clase()
+    res = {"semana": semana, "fase2": [], "salida": [], "revisadas": 0, "sinDatos": [], "omitido": None}
+    if not forzar and estado.get("semana") == semana:
+        res["omitido"] = "ya se hizo esta semana"; return res
+
+    objetivos = _leer_objetivos()
+    tickers = {}
+    for t, o in objetivos.items():
+        if not t.endswith("-USD"):
+            tickers[t] = (o or {}).get("mercado") or "USD"
+    for t in _leer_watchlist():
+        tickers.setdefault(t, "USD")
+
+    for t, mercado in sorted(tickers.items()):
+        es_usa = mercado == "USD"
+        try:
+            puntos = _serie5y_ticker(t, es_usa) or []
+            indice = _indice5y("usa" if es_usa else "chile")
+        except Exception:
+            puntos, indice = [], None
+        if not puntos:
+            res["sinDatos"].append(t); continue
+        act = indicador_fuerza_fase.evaluar_semanal(puntos, indice)
+        ant = indicador_fuerza_fase.evaluar_semanal_anterior(puntos, indice)
+        if not act.get("disponible") or not ant.get("disponible"):
+            res["sinDatos"].append(t); continue
+        res["revisadas"] += 1
+        candidata = lambda e: e["fase"] == 2 and e["scoreConfirmaciones"] >= 4
+        if candidata(act) and not candidata(ant):
+            res["fase2"].append({"ticker": t, "confirmaciones": act["scoreConfirmaciones"]})
+        if act["techoConfirmado"] and not ant["techoConfirmado"]:
+            res["salida"].append({"ticker": t, "evento": "techo", "agotamiento": act["scoreAgotamiento"]})
+        elif act["fase"] == 4 and ant["fase"] != 4:
+            res["salida"].append({"ticker": t, "evento": "fase4"})
+
+    lineas_push = ([f"{x['ticker']} entró en fase 2 ({x['confirmaciones']}/5)" for x in res["fase2"]]
+                   + [f"{x['ticker']}: {'techo confirmado' if x['evento'] == 'techo' else 'entró en fase 4'}"
+                      for x in res["salida"]])
+    if lineas_push:
+        cuerpo = [f"Semana cerrada · {semana}", ""]
+        for x in res["fase2"]:
+            cuerpo.append(f"FASE 2 · {x['ticker']} entró en fase 2 con {x['confirmaciones']} de 5 confirmaciones: "
+                          "candidata válida. Revisa su zona de compra.")
+        for x in res["salida"]:
+            cuerpo.append(f"SALIDA · {x['ticker']}: " + (
+                f"techo confirmado ({x['agotamiento']} de 5 señales de agotamiento). Preparar la salida."
+                if x["evento"] == "techo" else
+                "entró en fase 4: perdió la media de 30 semanas con pendiente bajista. La clase dice salir."))
+        cuerpo += ["", f"Revisadas: {res['revisadas']} (tu cartera, lo que esperas y tu watchlist).",
+                   f"👉 Abrir la app: {notify.FRONTEND_URL}", "", signals.DESCARGO]
+        n = len(lineas_push)
+        res["envio"] = _avisar(f"Semana · {n} aviso{'s' if n != 1 else ''}", lineas_push,
+                               f"IPSA Monitor · avisos de la semana · {n}", "\n".join(cuerpo), enviar)
+
+    if enviar and res["revisadas"] > 0:
+        estado = _leer_estado_clase()   # releer: el cierre pudo escribir mientras tanto
+        estado["semana"] = semana
+        _guardar_estado_clase(estado)
+    return res
+
+
+def _disparar_avisos_clase():
+    """Lo llama /run-check en cada pasada. Solo decide si toca; el trabajo
+    corre en segundo plano y deja su resumen en _clase_ultimo."""
+    ahora_ny = datetime.now(TZ_NY)
+    if ahora_ny.weekday() >= 5:
+        return
+    estado = _leer_estado_clase()
+    semana = "%d-W%02d" % ahora_ny.date().isocalendar()[:2]
+    if estado.get("semana") != semana and ahora_ny.hour >= 8:
+        _en_segundo_plano("avisos_semana", lambda: _clase_ultimo.update(semana=_tareas_semanales()))
+    if (estado.get("cierre") != ahora_ny.date().isoformat()
+            and ahora_ny.hour * 60 + ahora_ny.minute >= 16 * 60 + CIERRE_MIN_DESPUES):
+        _en_segundo_plano("avisos_cierre", lambda: _clase_ultimo.update(cierre=_tareas_al_cierre()))
+
+
+@app.route("/avisos-clase", methods=["GET"])
+def avisos_clase():
+    """
+    Diagnostico de los avisos de la clase (pide token).
+      sin parametros         -> estado guardado y resumen de la ultima corrida.
+      ?probar=cierre|semana  -> corre AHORA sin mandar nada (dry-run) y sin
+                                marcar el dia/semana como hecho. Sirve para
+                                ver que avisaria hoy.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    probar = request.args.get("probar")
+    if probar == "cierre":
+        return jsonify(_tareas_al_cierre(enviar=False, forzar=True))
+    if probar == "semana":
+        return jsonify(_tareas_semanales(enviar=False, forzar=True))
+    return jsonify({"estado": _leer_estado_clase(), "ultimaCorrida": _clase_ultimo,
+                    "reportes": _reportes_diag,
+                    "horaNY": datetime.now(TZ_NY).isoformat()})
+
+
 @app.route("/run-check", methods=["GET", "POST"])
 def run_check():
     if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
@@ -1570,6 +1993,13 @@ def run_check():
             return jsonify({"error": "no autorizado"}), 401
 
     _salud["checks_totales"] += 1
+    # Avisos de la clase (al cierre y semanales). Va ANTES del chequeo de
+    # Chile a proposito: si Yahoo no entrega Chile, este endpoint devuelve 503
+    # mas abajo, y eso no tiene por que callar los avisos de Nueva York.
+    try:
+        _disparar_avisos_clase()
+    except Exception as e:
+        print(f"[run-check] avisos de la clase: {type(e).__name__}: {e}")
     st = _refrescar_stats()
     quotes, _, _fuente = _obtener_precios()
 

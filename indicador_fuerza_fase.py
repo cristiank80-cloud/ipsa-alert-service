@@ -703,3 +703,21 @@ def evaluar_semanal(puntos, puntos_indice=None):
         # grafico igual que bgcolor() en el .pine (0 = sin dato, se omite).
         "serieFases": [{"date": fechas[i], "fase": fases[i]} for i in range(n) if fases[i] != 0],
     }
+
+
+def evaluar_semanal_anterior(puntos, puntos_indice=None):
+    """
+    El mismo diagnostico semanal, pero hasta la semana ANTERIOR a la ultima
+    cerrada. Sirve para detectar CAMBIOS sin guardar estado (Clases Acciones
+    USA, avisos semanales, 30-oct-2026): "entra en fase 2" es fase 2 ahora y
+    no la semana pasada. El disco de Render se borra en cada reinicio, asi que
+    comparar contra un archivo guardado fallaria justo los lunes, que es
+    cuando se reanuda el servicio.
+    """
+    semanas = _agrupar_semanas(puntos)
+    if len(semanas) < 2:
+        return {"disponible": False, "motivo": "menos de dos semanas cerradas"}
+    ultima = datetime.strptime(semanas[-1]["date"][:10], "%Y-%m-%d").date().isocalendar()[:2]
+    previos = [p for p in puntos
+               if datetime.strptime(p["date"][:10], "%Y-%m-%d").date().isocalendar()[:2] < ultima]
+    return evaluar_semanal(previos, puntos_indice)

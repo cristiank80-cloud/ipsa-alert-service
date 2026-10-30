@@ -665,6 +665,14 @@ def _serie_diaria(symbol, rango="1y"):
     adj = (indic.get("adjclose") or [{}])[0].get("adjclose")
     cierres = adj if adj else quote.get("close") or []
     volumenes = quote.get("volume") or []
+    # Maximo y minimo del dia (Clases Acciones USA, 30-oct-2026). Yahoo ya los
+    # mandaba en la misma respuesta; hasta ahora se descartaban. Los usan la
+    # zona de compra (maximo intradia de 30 semanas) y el stop de la clase
+    # (minimo intradia de 10 sesiones). Van SIN ajustar por dividendo, a
+    # proposito: un stop o una zona son precios de orden, y la orden se pone
+    # al precio de verdad, no al ajustado.
+    altos = quote.get("high") or []
+    bajos = quote.get("low") or []
 
     puntos = []
     for i, ts in enumerate(fechas):
@@ -676,8 +684,68 @@ def _serie_diaria(symbol, rango="1y"):
             "date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
             "close": c,
             "volume": v,
+            "high": _limpio(altos[i]) if i < len(altos) else None,
+            "low": _limpio(bajos[i]) if i < len(bajos) else None,
         })
     return puntos
+
+
+def _semana_iso(fecha):
+    """'YYYY-MM-DD' -> (año ISO, semana ISO)."""
+    return datetime.strptime(fecha[:10], "%Y-%m-%d").date().isocalendar()[:2]
+
+
+def niveles_clase(puntos):
+    """
+    Los tres numeros de la Clase de Acciones USA (gestion por riesgo) que
+    salen de la serie diaria. Devuelve un dict con None donde no alcanza el
+    historial -- nunca un numero a medias.
+
+      max30sem  maximo INTRADIA de las 30 semanas cerradas anteriores a la
+                semana en curso. Es el "maximo previo" que propone la zona de
+                compra; mismo criterio que la confirmacion 3 de Weinstein
+                (romper el maximo de 30 semanas), pero con maximos y no con
+                cierres, como en el indicador oficial.
+      min10     minimo INTRADIA de las ultimas 10 sesiones (2 semanas). Es la
+                mitad "soporte" del stop de la clase:
+                stop = el mas alto entre min10 y entrada - 7 %.
+      volUlt / volPen
+                volumen de la ultima sesion y de la anterior, cada uno con el
+                promedio de las 50 sesiones previas. Son dos porque con la
+                bolsa abierta la ultima sesion esta a medio hacer: la app
+                elige cual mostrar segun la hora de Nueva York.
+    """
+    out = {"max30sem": None, "min10": None, "volUlt": None, "volPen": None}
+    if not puntos:
+        return out
+
+    semana_hoy = datetime.now(timezone.utc).date().isocalendar()[:2]
+    semanas = []
+    for p in puntos:
+        k = _semana_iso(p["date"])
+        if k != semana_hoy and (not semanas or semanas[-1] != k):
+            semanas.append(k)
+    if len(semanas) >= 30:
+        ult30 = set(semanas[-30:])
+        altos = [p["high"] if p.get("high") is not None else p["close"]
+                 for p in puntos if _semana_iso(p["date"]) in ult30]
+        out["max30sem"] = max(altos) if altos else None
+
+    if len(puntos) >= 10:
+        out["min10"] = min(p["low"] if p.get("low") is not None else p["close"]
+                           for p in puntos[-10:])
+
+    def _vol(j):
+        if j < 0 or j >= len(puntos):
+            return None
+        v = puntos[j].get("volume")
+        previos = [p["volume"] for p in puntos[max(0, j - 50):j] if p.get("volume")]
+        if not v or len(previos) < 40:
+            return None
+        return {"fecha": puntos[j]["date"], "vol": v, "prom50": sum(previos) / len(previos)}
+    out["volUlt"] = _vol(len(puntos) - 1)
+    out["volPen"] = _vol(len(puntos) - 2)
+    return out
 
 
 def _rsi(cierres, periodo=14):
@@ -889,6 +957,8 @@ def _estadisticas(puntos, dias_promedio=90):
         "ultimoCierreDiario": ultimo,
         "fechaUltimoCierre": puntos[-1]["date"],
         "diasDeHistorial": len(cierres),
+        # Zona de compra, stop y volumen de la clase -- ver niveles_clase().
+        **niveles_clase(puntos),
     }
 
 
@@ -1045,6 +1115,105 @@ def get_proximos_reportes(tickers, suffix=None):
             return t, None
 
     return {t: d for t, d in _en_paralelo(_uno, tickers) if d}
+
+
+_NASDAQ_CAL_URL = "https://api.nasdaq.com/api/calendar/earnings"
+_NASDAQ_CAL_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/",
+}
+
+
+def _reportes_nasdaq(tickers, dias_habiles=10):
+    """
+    Calendario publico de Nasdaq, un dia por peticion, desde HOY y por
+    `dias_habiles` dias habiles. Devuelve ({ticker: fecha_iso}, hasta_iso,
+    dias_ok). `hasta_iso` es el ultimo dia revisado; si `dias_ok` ==
+    dias_habiles, una accion que no aparecio NO reporta en esa ventana -- y
+    eso tambien es un dato (la condicion 4 de la clase solo necesita saber
+    si reporta en los proximos 5 dias habiles).
+    """
+    buscados = {t.upper() for t in tickers}
+    hallados = {}
+    d = datetime.now(timezone.utc).date()
+    revisados, dias_ok, hasta = 0, 0, None
+    while revisados < dias_habiles and len(hallados) < len(buscados):
+        if d.weekday() < 5:
+            revisados += 1
+            r = requests.get(_NASDAQ_CAL_URL, params={"date": d.isoformat()},
+                             headers=_NASDAQ_CAL_HEADERS, timeout=15)
+            if r.status_code != 200:
+                raise RuntimeError(f"Nasdaq HTTP {r.status_code} para {d.isoformat()}")
+            datos = (r.json() or {}).get("data") or {}
+            for fila in datos.get("rows") or []:
+                sim = str(fila.get("symbol") or "").strip().upper().replace("/", "-").replace(".", "-")
+                if sim in buscados and sim not in hallados:
+                    hallados[sim] = d.isoformat()
+            dias_ok += 1
+            hasta = d.isoformat()
+            time.sleep(0.3)
+        d += timedelta(days=1)
+    return hallados, hasta, dias_ok == revisados
+
+
+def proximos_reportes_con_respaldo(tickers, ventana_nasdaq=10):
+    """
+    Proximo reporte de resultados, de la fuente que conteste:
+
+      1. Yahoo (get_proximos_reportes): pide crumb, y desde sept-2026 Yahoo
+         se lo niega a Render -- se intenta igual, por si vuelve.
+      2. TradingView (fuente_tradingview.proximos_reportes): una peticion
+         para todas las que falten.
+      3. Nasdaq (_reportes_nasdaq): calendario de los proximos
+         `ventana_nasdaq` dias habiles para las que sigan faltando.
+
+    Devuelve ({ticker: {"fecha", "epoch", "fuente"} o
+                        {"fecha": None, "sinReporteHasta", "fuente"}},
+              diagnostico). Nunca inventa una fecha: lo que ninguna fuente
+    contesta simplemente no aparece.
+    """
+    tickers = list(dict.fromkeys(t.upper() for t in tickers))
+    res, diag = {}, {"pedidas": len(tickers), "porFuente": {}, "errores": {}}
+    ahora = time.time()
+
+    try:
+        for t, d in (get_proximos_reportes(tickers, suffix="") or {}).items():
+            res[t] = dict(d, fuente="yahoo")
+    except Exception as e:
+        diag["errores"]["yahoo"] = f"{type(e).__name__}: {e}"
+
+    faltan = [t for t in tickers if t not in res]
+    if faltan:
+        try:
+            import fuente_tradingview
+            for t, epoch in fuente_tradingview.proximos_reportes(faltan).items():
+                if t in faltan and epoch > ahora - 86400:
+                    res[t] = {"fecha": datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d"),
+                              "epoch": int(epoch), "fuente": "tradingview"}
+        except Exception as e:
+            diag["errores"]["tradingview"] = f"{type(e).__name__}: {e}"
+
+    faltan = [t for t in tickers if t not in res]
+    if faltan:
+        try:
+            hallados, hasta, completo = _reportes_nasdaq(faltan, ventana_nasdaq)
+            for t, fecha in hallados.items():
+                res[t] = {"fecha": fecha, "epoch": None, "fuente": "nasdaq"}
+            if completo and hasta:
+                for t in faltan:
+                    if t not in res:
+                        res[t] = {"fecha": None, "sinReporteHasta": hasta, "fuente": "nasdaq"}
+        except Exception as e:
+            diag["errores"]["nasdaq"] = f"{type(e).__name__}: {e}"
+
+    for v in res.values():
+        diag["porFuente"][v["fuente"]] = diag["porFuente"].get(v["fuente"], 0) + 1
+    diag["sinDato"] = [t for t in tickers if t not in res]
+    return res, diag
 
 
 def get_rango_5y(tickers, suffix=None):

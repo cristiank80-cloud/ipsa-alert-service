@@ -190,3 +190,51 @@ def escanear(extra=()):
                 conCrecimiento=sum(1 for v in datos.values() if v["crecBpa"] is not None),
                 segundos=round(time.time() - t0, 1))
     return datos, diag
+
+
+# ---------------------------------------------------------------------------
+# Proximo reporte de resultados (Clases Acciones USA, 30-oct-2026)
+# ---------------------------------------------------------------------------
+# Respaldo de Yahoo para la condicion 4 de la clase ("no reporta resultados en
+# los proximos dias"): Yahoo pide crumb y se lo niega a Render desde
+# septiembre. Es la columna "Upcoming earnings date" del screener
+# (earnings_release_next_date, epoch en segundos). Si la fecha no esta
+# confirmada, TradingView la estima con el historial de la empresa.
+#
+# Una sola peticion para todas las acciones pedidas. Igual que escanear():
+# no oficial, puede cortarse; quien llama tiene que sobrevivir a un error.
+_COL_REPORTE = "earnings_release_next_date"
+
+
+def proximos_reportes(tickers):
+    """{TICKER_YAHOO: epoch_segundos} para las que TradingView trae fecha.
+    Lanza excepcion si la peticion falla (quien llama decide el respaldo)."""
+    if not tickers:
+        return {}
+    nombres = sorted({t.strip().upper().replace("-", ".") for t in tickers})
+    cuerpo = {
+        "markets": ["america"],
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "options": {"lang": "en"},
+        "filter": [
+            {"left": "name", "operation": "in_range", "right": nombres},
+            {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]},
+        ],
+        "columns": ["name", _COL_REPORTE],
+        "range": [0, max(50, len(nombres) * 3)],
+    }
+    r = requests.post(_URL, json=cuerpo, headers=_HEADERS, timeout=_TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {(r.text or '')[:120]}")
+    j = r.json()
+    if j.get("error"):
+        raise RuntimeError(f"error del screener: {str(j['error'])[:120]}")
+    out = {}
+    for fila in j.get("data") or []:
+        d = fila.get("d") or []
+        if len(d) < 2:
+            continue
+        epoch = _num(d[1])
+        if epoch:
+            out.setdefault(_a_yahoo(d[0]), int(epoch))
+    return out
