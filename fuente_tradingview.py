@@ -238,3 +238,78 @@ def proximos_reportes(tickers):
         if epoch:
             out.setdefault(_a_yahoo(d[0]), int(epoch))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Respaldo de la ficha fundamental (Clases Acciones USA, punto 3, 30-oct-2026)
+# ---------------------------------------------------------------------------
+# Para lo que la SEC no trae. Son numeros del momento (12 meses o ultimo
+# trimestre), sin historia. Los nombres de columna del screener no estan
+# documentados: se piden varios candidatos y, si el screener contesta
+# 'Unknown field "x"', se saca ese campo y se reintenta. Los rechazados se
+# recuerdan mientras el servidor este vivo y salen en /ficha-diag.
+_FUND_CANDIDATAS = {
+    "crecVentas": ["total_revenue_yoy_growth_ttm"],
+    "crecBpa": ["earnings_per_share_diluted_yoy_growth_ttm"],
+    "cfo": ["cash_f_operating_activities_ttm", "cash_f_operating_activities"],
+    "cfi": ["cash_f_investing_activities_ttm", "cash_f_investing_activities"],
+    "cff": ["cash_f_financing_activities_ttm", "cash_f_financing_activities"],
+    "fcf": ["free_cash_flow_ttm", "free_cash_flow"],
+    "utilidad": ["net_income_ttm", "net_income"],
+    "deuda": ["total_debt", "total_debt_fq"],
+    "roic": ["return_on_invested_capital", "return_on_invested_capital_fq"],
+}
+FUND_RECHAZADAS = set()
+FUND_DIAG = {"ultimoError": None, "columnasUsadas": None}
+
+
+def fundamentales(tickers):
+    """{TICKER_YAHOO: {crecVentas, crecBpa, cfo, cfi, cff, fcf, utilidad,
+    deuda, roic}} (los % vienen en %, los montos en la moneda del reporte).
+    Lanza excepcion si el screener no responde."""
+    if not tickers:
+        return {}
+    nombres = sorted({t.strip().upper().replace("-", ".") for t in tickers})
+    columnas = ["name"] + [c for cands in _FUND_CANDIDATAS.values() for c in cands
+                           if c not in FUND_RECHAZADAS]
+    for _ in range(15):
+        cuerpo = {
+            "markets": ["america"],
+            "symbols": {"query": {"types": []}, "tickers": []},
+            "options": {"lang": "en"},
+            "filter": [
+                {"left": "name", "operation": "in_range", "right": nombres},
+                {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]},
+            ],
+            "columns": columnas,
+            "range": [0, max(50, len(nombres) * 3)],
+        }
+        r = requests.post(_URL, json=cuerpo, headers=_HEADERS, timeout=_TIMEOUT)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        error = str(j.get("error") or "") if isinstance(j, dict) else ""
+        if r.status_code == 200 and not error:
+            break
+        # Campo desconocido: se saca y se reintenta.
+        malo = next((c for c in columnas[1:] if f'"{c}"' in (error or r.text or "")), None)
+        if not malo:
+            FUND_DIAG["ultimoError"] = f"HTTP {r.status_code}: {(error or r.text or '')[:160]}"
+            raise RuntimeError(FUND_DIAG["ultimoError"])
+        FUND_RECHAZADAS.add(malo)
+        columnas.remove(malo)
+    else:
+        raise RuntimeError("demasiados campos rechazados por el screener")
+    FUND_DIAG["columnasUsadas"] = columnas[1:]
+    out = {}
+    for fila in j.get("data") or []:
+        d = fila.get("d") or []
+        if not d or not d[0]:
+            continue
+        val = dict(zip(columnas, d))
+        res = {}
+        for clave, cands in _FUND_CANDIDATAS.items():
+            res[clave] = next((_num(val.get(c)) for c in cands if _num(val.get(c)) is not None), None)
+        out.setdefault(_a_yahoo(d[0]), res)
+    return out

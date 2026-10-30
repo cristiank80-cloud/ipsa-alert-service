@@ -1949,6 +1949,16 @@ def _tareas_semanales(enviar=True, forzar=False):
     return res
 
 
+def _toca_semanal(ahora_ny, estado):
+    """Los avisos semanales corren SOLO EL LUNES, desde las 8:00 de Nueva York.
+    Antes bastaba con "no se ha hecho esta semana": como el estado vive en el
+    disco efimero de Render, cada reinicio a mitad de semana (un despliegue,
+    por ejemplo) los volvia a mandar, y el primer despliegue los mando un
+    viernes con la semana anterior. Corregido el 30-oct-2026."""
+    semana = "%d-W%02d" % ahora_ny.date().isocalendar()[:2]
+    return ahora_ny.weekday() == 0 and ahora_ny.hour >= 8 and estado.get("semana") != semana
+
+
 def _disparar_avisos_clase():
     """Lo llama /run-check en cada pasada. Solo decide si toca; el trabajo
     corre en segundo plano y deja su resumen en _clase_ultimo."""
@@ -1956,8 +1966,7 @@ def _disparar_avisos_clase():
     if ahora_ny.weekday() >= 5:
         return
     estado = _leer_estado_clase()
-    semana = "%d-W%02d" % ahora_ny.date().isocalendar()[:2]
-    if estado.get("semana") != semana and ahora_ny.hour >= 8:
+    if _toca_semanal(ahora_ny, estado):
         _en_segundo_plano("avisos_semana", lambda: _clase_ultimo.update(semana=_tareas_semanales()))
     if (estado.get("cierre") != ahora_ny.date().isoformat()
             and ahora_ny.hour * 60 + ahora_ny.minute >= 16 * 60 + CIERRE_MIN_DESPUES):
@@ -1983,6 +1992,93 @@ def avisos_clase():
     return jsonify({"estado": _leer_estado_clase(), "ultimaCorrida": _clase_ultimo,
                     "reportes": _reportes_diag,
                     "horaNY": datetime.now(TZ_NY).isoformat()})
+
+
+# ---------------------------------------------------------------------------
+# Ficha fundamental de la clase (punto 3, 30-oct-2026)
+# ---------------------------------------------------------------------------
+# Las 5 preguntas, la firma de caja y el puntaje. El calculo vive en
+# fundamentales_sec.py (SEC primero, TradingView de respaldo). Aqui solo se
+# reciben pedidos: lo que no esta calculado entra a una cola que trabaja en
+# segundo plano, y la app vuelve a preguntar (el servidor tiene un solo
+# worker; bajar una ficha toma varios segundos).
+import fundamentales_sec
+
+_TICKERS_CHILE = set(TICKERS)
+_FICHA_MAX_LOTE = 60
+fundamentales_sec.SIN_PERFIL = set(TICKERS_USA)
+
+
+def _ficha_no_aplica(t):
+    if t in _TICKERS_CHILE:
+        return "Las chilenas reportan a la CMF, no a la SEC: la ficha no aplica."
+    if t in _ETFS_USA_SET:
+        return "Es un ETF: la ficha es para empresas."
+    if t.endswith("-USD"):
+        return "Es una cripto: la ficha es para empresas."
+    return None
+
+
+def _ficha_tickers(texto):
+    vistos, out = set(), []
+    for t in (texto or "").replace(";", ",").split(","):
+        t = t.strip().upper()
+        if t and _re.fullmatch(r"[A-Z0-9.\-]{1,12}", t) and t not in vistos:
+            vistos.add(t)
+            out.append(t)
+    return out[:_FICHA_MAX_LOTE]
+
+
+@app.route("/ficha-lote", methods=["GET"])
+def ficha_lote():
+    """
+    /ficha-lote?t=NVDA,APH,KEYS[&prio=1]  (hasta 60; prio = pasan adelante)
+    -> {"fichas": {t: ficha}, "pendientes": [t...], "noAplica": {t: motivo}}
+    Lo pendiente queda en la cola; la app vuelve a preguntar en unos segundos.
+    Publico, como /accion: no cambia nada y solo devuelve datos de la SEC.
+    """
+    tks = _ficha_tickers(request.args.get("t"))
+    no_aplica = {t: m for t in tks for m in [_ficha_no_aplica(t)] if m}
+    fichas, pend = fundamentales_sec.pedir([t for t in tks if t not in no_aplica],
+                                           primero=request.args.get("prio") == "1")
+    return jsonify({"fichas": fichas, "pendientes": pend, "noAplica": no_aplica,
+                    "secIdentificado": bool(fundamentales_sec.SEC_USER_AGENT)})
+
+
+@app.route("/ficha", methods=["GET"])
+def ficha_una():
+    """/ficha?ticker=NVDA -> la ficha, o {"pendiente": true} si se esta calculando."""
+    t = (_ficha_tickers(request.args.get("ticker")) or [""])[0]
+    if not t:
+        return jsonify({"error": "falta ticker"}), 400
+    m = _ficha_no_aplica(t)
+    if m:
+        return jsonify({"ticker": t, "aplica": False, "motivo": m})
+    fichas, pend = fundamentales_sec.pedir([t], primero=True)
+    return jsonify(fichas.get(t) or {"ticker": t, "pendiente": True})
+
+
+@app.route("/ficha-diag", methods=["GET"])
+def ficha_diag():
+    """
+    Diagnostico de la ficha (pide token).
+      sin parametros          -> cola, cache, peticiones a la SEC, errores,
+                                 columnas de TradingView aceptadas/rechazadas.
+      ?ticker=NVDA            -> calcula AHORA esa ficha (espera ~10 s) y la
+                                 devuelve con las etiquetas contables usadas.
+    """
+    if CHECK_SECRET and request.args.get("token") != CHECK_SECRET:
+        return jsonify({"error": "no autorizado"}), 401
+    t = (_ficha_tickers(request.args.get("ticker")) or [""])[0]
+    if t:
+        f = fundamentales_sec.calcular(t)
+        with fundamentales_sec._lock:
+            fundamentales_sec._cache[t] = {"ficha": f, "ts": time.time()}
+        return jsonify(f)
+    import fuente_tradingview
+    return jsonify(dict(fundamentales_sec.diagnostico(),
+                        tradingview=dict(fuente_tradingview.FUND_DIAG,
+                                         rechazadas=sorted(fuente_tradingview.FUND_RECHAZADAS))))
 
 
 @app.route("/run-check", methods=["GET", "POST"])
