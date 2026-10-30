@@ -876,6 +876,38 @@ _ESTADO = {
 _RESULTADO = {"datos": None, "ts": 0}
 
 
+def _reportes_explorar(tickers):
+    """Proximo reporte de resultados de las acciones diagnosticadas
+    (Clases Acciones USA, 30-oct-2026). TradingView primero (UNA peticion
+    para todas) y el calendario de Nasdaq para las que falten. Yahoo NO: aca
+    serian decenas de peticiones sueltas en plena corrida, y Yahoo estrangula
+    las rafagas desde Render. Nunca inventa una fecha: lo que no se sabe no
+    aparece. Cualquier error deja el resultado vacio y la corrida sigue."""
+    out = {}
+    if not tickers:
+        return out
+    ahora = time.time()
+    try:
+        for t, epoch in fuente_tradingview.proximos_reportes(tickers).items():
+            if epoch > ahora - 86400:
+                out[t] = {"fecha": datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d"),
+                          "fuente": "tradingview"}
+    except Exception as e:
+        print(f"[explorar] fechas de resultados (TradingView): {type(e).__name__}: {e}")
+    faltan = [t for t in tickers if t not in out]
+    if faltan:
+        try:
+            hallados, hasta, completo = data_source._reportes_nasdaq(faltan, 10)
+            for t, fecha in hallados.items():
+                out[t] = {"fecha": fecha, "fuente": "nasdaq"}
+            if completo and hasta:
+                for t in faltan:
+                    out.setdefault(t, {"fecha": None, "sinReporteHasta": hasta, "fuente": "nasdaq"})
+        except Exception as e:
+            print(f"[explorar] fechas de resultados (Nasdaq): {type(e).__name__}: {e}")
+    return out
+
+
 def _set(etapa, progreso):
     with _LOCK:
         _ESTADO["etapa"] = etapa
@@ -1026,7 +1058,25 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
 
     # Los que el lote no resolvio van por el camino viejo, respetando el
     # presupuesto de tiempo. El NUCLEO va primero, por lo mismo de siempre.
+    #
+    # ARREGLO 30-oct-2026 ("se corto por tiempo" con el nucleo en 533/539):
+    #   1. El orden "nucleo primero" se perdia desde que entro TradingView:
+    #      `universo = sorted(...)` lo deja en orden alfabetico, y los del
+    #      nucleo que TradingView no trae (bitcoin, simbolos renombrados) se
+    #      bajaban mezclados con ~2.500 acciones chicas. Los del final del
+    #      abecedario se quedaban sin revisar. Ahora se ordena explicitamente.
+    #   2. Con TradingView arriba, lo que falta y NO es del nucleo esta bajo
+    #      el piso del screener (precio < 5, cap. < 0,5 B o volumen < 0,3 M):
+    #      no puede pasar el embudo del metodo, y bajar su historial de a uno
+    #      gastaba los 6 minutos del presupuesto y castigaba a Yahoo. Ya no se
+    #      baja; se cuenta aparte ("bajo el piso") y no cuenta como "cortado".
+    nucleo_set = set(nucleo or ())
     faltan = [t for t in universo if t not in metricas]
+    bajo_piso = []
+    if tv:
+        bajo_piso = [t for t in faltan if t not in nucleo_set]
+        faltan = [t for t in faltan if t in nucleo_set]
+    faltan.sort(key=lambda t: t not in nucleo_set)   # estable: nucleo primero
     ahora = time.time()
     with _SERIES_LOCK:
         # Las claves de la cache son "TICKER|rango" desde que el benchmark y
@@ -1040,6 +1090,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     en_cache = [t for t in faltan if t in frescas]
     por_bajar = [t for t in faltan if t not in frescas]
     orden = en_cache + por_bajar
+    orden.sort(key=lambda t: t not in nucleo_set)    # estable: nucleo primero
 
     if orden:
         _set(f"{len(en_cache)} ya en caché · bajando hasta "
@@ -1082,7 +1133,6 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # resultado se puede comparar con corridas anteriores (y con TradingView
     # restringido a los indices): si el nucleo quedo entero, "0 candidatas"
     # significa que de verdad no hubo; si quedo a medias, no significa nada.
-    nucleo_set = set(nucleo or ())
     nucleo_revisado = len([t for t in metricas if t in nucleo_set]) if nucleo_set else None
     # DOS MOTIVOS DISTINTOS, Y CONFUNDIRLOS FUE UN ERROR MIO
     # ======================================================
@@ -1111,6 +1161,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         (f"Mercado completo de EE.UU. vía TradingView ({diag_tv.get('filas')} acciones "
          f"sobre el piso) + tu universo de {universo_original} · " if tv else "")
         + f"{len(metricas)} revisadas de {len(universo)} del universo"
+        + (f" ({len(bajo_piso)} bajo el piso de TradingView, no se revisan)" if bajo_piso else "")
         + (f" · el núcleo ({len(nucleo_set)}) quedó "
            + (("entero" + (f", salvo {len(nucleo_sin_datos)} sin datos en Yahoo"
                            if nucleo_sin_datos else ""))
@@ -1226,6 +1277,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         return t, {
             "diario": indicador_fuerza_fase.evaluar_diario(puntos, idx),
             "semanal": indicador_fuerza_fase.evaluar_semanal(puntos, idx),
+            # Clases Acciones USA (30-oct-2026): maximo de 30 semanas (la
+            # ruptura que abre la zona de compra) y minimo de 10 sesiones (el
+            # stop de la clase). Salen de la MISMA serie que ya se bajo para
+            # la fase: no cuestan ninguna peticion mas.
+            "niveles": data_source.niveles_clase(puntos),
         }
 
     # A QUIENES SE LES CALCULA FASE Y FUERZA
@@ -1251,6 +1307,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
 
     _set(f"Fase y fuerza de {len(a_diagnosticar)} acciones…", 74)
     diags = {t: d for t, d in _paralelo(_diag, a_diagnosticar) if d}
+    _set("Fechas de resultados…", 88)
+    reportes = _reportes_explorar([t for t in diags if t not in set(sin_fundamentales or ())])
     _set("Cruzando fase, score y fuerza relativa…", 90)
 
     def _tarjeta(t, metricas_t):
@@ -1262,7 +1320,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         # nuevo aca seria duplicar su logica y arriesgarse a que las dos
         # cuentas se separen en el futuro.
         n_conf = sem.get("scoreConfirmaciones") if sem.get("disponible") else None
+        niv = d.get("niveles") or {}
         return {
+            "maximo30sem": niv.get("max30sem"),
+            "min10": niv.get("min10"),
+            "proximoReporte": reportes.get(t),
             "ticker": t,
             "nombre": f.get("nombre") or t,
             "sector": f.get("sector"),
@@ -1322,7 +1384,16 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         fr = None
         if frd.get("disponible"):
             fr = 1 if frd.get("pendientePositiva") else 0
+        niv = d.get("niveles") or {}
+        rep_t = reportes.get(t) or {}
         return {
+            # x30 maximo intradia de 30 semanas · m10 minimo intradia de 10
+            # sesiones · rp proximo reporte (YYYY-MM-DD) · rpS "sin reporte
+            # hasta" (Nasdaq miro el calendario y no aparece) -- Clases USA.
+            "x30": round(niv["max30sem"], 2) if niv.get("max30sem") else None,
+            "m10": round(niv["min10"], 2) if niv.get("min10") else None,
+            "rp": rep_t.get("fecha"),
+            "rpS": rep_t.get("sinReporteHasta"),
             "t": t,
             "n": f.get("nombre") or t,
             "p": round(m["precio"], 2),
@@ -1431,7 +1502,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         "revisarAMano": len(revisar_a_mano),
         "sectoresFuertes": [x["nombre"] for x in sectores[:3]],
         "industriasFuertes": [x["nombre"] for x in industrias[:3]],
-        "cobertura": round(len(metricas) / max(1, len(universo)) * 100),
+        "cobertura": round(len(metricas) / max(1, len(universo) - len(bajo_piso)) * 100),
         "frase": (
             f"{len(finalistas)} candidata(s) sobre {len(metricas)} acciones revisadas"
             + (f", más {len(revisar_a_mano)} para mirar a mano" if revisar_a_mano else "")
@@ -1460,7 +1531,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "revisadas": len(metricas),
             "sinRevisarPorTiempo": len(saltadas),
             "seCortoPorTiempo": bool(saltadas),
-            "cobertura": round(len(metricas) / max(1, len(universo)) * 100, 1),
+            "cobertura": round(len(metricas) / max(1, len(universo) - len(bajo_piso)) * 100, 1),
+            # Bajo el piso de TradingView: no se revisan a proposito (ver el
+            # arreglo del 30-oct junto a `faltan`). La cobertura se mide
+            # contra el resto.
+            "bajoPisoTV": len(bajo_piso),
             "veniaEnCache": len(en_cache),
             # De donde salieron precio/medias/volumen. Ver metricas_por_lote:
             # `porLote` es el camino rapido, `porSerie` el respaldo de siempre.
@@ -1550,8 +1625,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             f"si alguno ya no existe, sácalo de la lista en main.py y dejas de "
             f"gastar una petición en él cada corrida."
         ] if nucleo_sin_datos else []) + ([
-            f"Este análisis decidió sobre {len(metricas)} de las {len(universo)} "
-            f"del universo ({round(len(metricas)/max(1,len(universo))*100)} %). "
+            f"Este análisis decidió sobre {len(metricas)} de las {len(universo) - len(bajo_piso)} "
+            f"del universo ({round(len(metricas)/max(1,len(universo) - len(bajo_piso))*100)} %). "
             f"Quedaron {len(saltadas)} sin revisar porque se acabó el presupuesto "
             f"de tiempo: Yahoo estrangula las peticiones cuando le llegan cientos "
             f"seguidas. Vuelve a correrlo y sigue desde donde quedó — lo ya bajado "
@@ -1567,7 +1642,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             f"~{rotacion['periodoDias']} días. Por eso qué candidatas "
             f"aparecen fuera del núcleo puede cambiar día a día aunque "
             f"nada más cambie."
-        ] if rotacion and rotacion.get("totalResto") else []) + ([
+        ] if rotacion and rotacion.get("totalResto") and not tv else []) + ([
             # Tambien informativa: explica por que estos tickers pueden
             # aparecer sin capitalizacion/crecimiento y aun asi ser
             # candidatas, sin que parezca un dato faltante de Yahoo.
