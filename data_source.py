@@ -393,6 +393,7 @@ def metricas_por_lote(symbols, tam_lote=40):
             "sma200": float(sma200),
             "volM": round(float(vol) / 1e6, 2),
             "capB": round(float(cap) / 1e9, 2) if _pos(cap) else None,
+            "max52": float(f["fiftyTwoWeekHigh"]) if _pos(f.get("fiftyTwoWeekHigh")) else None,
             "fuente": "lote",
         }
     return out, {

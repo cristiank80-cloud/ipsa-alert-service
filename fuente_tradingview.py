@@ -50,11 +50,21 @@ _HEADERS = {
 }
 _TIMEOUT = 30
 
-PISO = {"precio": 5.0, "capB": 0.5, "volM": 0.3}
+# El piso de volumen bajó de 0,3 M a 0,05 M de acciones el 5-nov-2026, con el
+# método 2: ese mide la liquidez en DÓLARES, y una acción cara transa pocas
+# acciones aunque mueva mucha plata -- Mettler-Toledo transa 0,19 M de
+# acciones al día, que a US$ 1.686 son ~US$ 317 M. Con el piso viejo solo
+# entraba por ser del S&P 500 (la segunda petición del núcleo); una igual de
+# cara fuera del índice no habría entrado nunca. Son unas cientos de filas
+# más; los filtros de verdad siguen siendo los del método que se corra.
+PISO = {"precio": 5.0, "capB": 0.5, "volM": 0.05}
 
 _COLUMNAS = ["name", "close", "market_cap_basic", "average_volume_90d_calc",
              "SMA50", "SMA200", "earnings_per_share_diluted_yoy_growth_ttm",
-             "total_revenue_yoy_growth_ttm", "sector", "industry", "description"]
+             "total_revenue_yoy_growth_ttm", "sector", "industry", "description",
+             # Máximo de 52 semanas (5-nov-2026, método 2 de Explorar). Va AL
+             # FINAL a propósito: _fila() desempaca por posición.
+             "price_52_week_high"]
 
 # Taxonomia de TradingView (FactSet) -> nombres de sector de Yahoo, que son los
 # que el frontend sabe cruzar con los 11 ETF de sector. NO es 1 a 1: FactSet
@@ -118,7 +128,7 @@ def _pedir(filtros, rango=6000):
 def _fila(d):
     """Una fila del screener -> el formato de `metricas` + `fund` de explorar."""
     (nombre, precio, cap, vol, sma50, sma200, crec_bpa, crec_ventas,
-     sector, industria, descripcion) = (list(d) + [None] * len(_COLUMNAS))[:len(_COLUMNAS)]
+     sector, industria, descripcion, max52) = (list(d) + [None] * len(_COLUMNAS))[:len(_COLUMNAS)]
     sector_y = SECTOR_A_YAHOO.get(sector or "")
     if industria in _INDUSTRIA_REAL_ESTATE:
         sector_y = "Real Estate"
@@ -133,6 +143,7 @@ def _fila(d):
         "sector": sector_y,
         "industria": industria or None,
         "nombre": descripcion or nombre,
+        "max52": _num(max52),
     }
 
 

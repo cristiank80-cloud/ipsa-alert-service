@@ -31,7 +31,7 @@ Ya paso cuando EE.UU. crecio de 7 a 107 instrumentos. Por eso:
 
   * el trabajo vive en un hilo (`iniciar()` devuelve al tiro),
   * el progreso se consulta aparte (`estado()`),
-  * el resultado queda en cache 24h (`_RESULTADO`),
+  * el resultado queda en cache 24h, uno por método (`_RESULTADOS`),
   * y solo puede haber UNA corrida a la vez.
 
 CUANTA RED CUESTA UNA CORRIDA
@@ -99,6 +99,50 @@ UMBRALES = {
     "volM": 2.0,
     "crecimiento": 25.0,
 }
+
+# ---------------------------------------------------------------------------
+# MÉTODO 2 · CALIDAD EN TENDENCIA (5-nov-2026)
+# ---------------------------------------------------------------------------
+# El método de arriba (método 1) busca CRECIMIENTO RÁPIDO: BPA y ventas
+# creciendo 25 % o más. El reporte de Inversapiens que Cristian usa como guía
+# elige otra cosa: empresas de calidad en tendencia, cerca de sus máximos,
+# que crecen 2-15 % (MTD, VLTO, VRSN, FAST, CCEP, GILD, THG, MA...). Ninguna
+# pasaba el método 1, y la mayoría tampoco el volumen: se medía en ACCIONES y
+# castigaba a las caras. Probado contra el mercado completo el 5-nov-2026
+# (TradingView, antes de la fase de Weinstein): método 1 → 5 acciones;
+# método 2 → 169, con 8 de las 12 del reporte.
+#
+# Decisiones de Cristian (5-nov-2026): a ≤ 5 % del máximo de 52 semanas,
+# ventas ≥ 0 %, y fase de Weinstein para TODAS las que pasen (no tope de 60).
+# El resto del método (precio, capitalización, tendencia, fase 2 con 4+
+# confirmaciones, score y fuerza relativa, ficha fundamental, una por motor)
+# es el mismo en los dos.
+UMBRALES_M2 = {
+    "precio": 10.0,
+    "capB": 2.0,
+    "montoM": 20.0,      # monto medio diario en millones de US$ (precio × volumen 90 d)
+    "distMax": 5.0,      # cuánto bajo su máximo de 52 semanas puede estar, en %
+    "crecVentas": 0.0,   # ventas TTM contra los 12 meses anteriores, en %
+}
+METODOS = ("1", "2")
+
+
+def umbrales_base(metodo):
+    return dict(UMBRALES_M2 if metodo == "2" else UMBRALES)
+
+
+def _completar_metricas(metricas):
+    """Monto diario en US$ y distancia al máximo de 52 semanas, para el método
+    2. Se calculan para todas (cuestan nada) así la app puede mover sus barras
+    sin volver a correr."""
+    for m in metricas.values():
+        if not m:
+            continue
+        p, v, mx = m.get("precio"), m.get("volM"), m.get("max52")
+        m["montoM"] = round(p * v, 1) if isinstance(p, (int, float)) and isinstance(v, (int, float)) else None
+        m["distMax"] = (round(max(0.0, (1 - p / mx) * 100), 2)
+                        if isinstance(p, (int, float)) and isinstance(mx, (int, float)) and mx > 0 else None)
+
 
 TTL_RESULTADO = 24 * 3600
 
@@ -192,6 +236,12 @@ TOPE_DUDOSAS = 15
 # minutos. 60 alcanza para que los filtros de la app se puedan mover con
 # sentido; mas que eso es pagar mucho por acciones que casi nunca se miran.
 TOPE_DIAG = int(__import__("os").environ.get("EXPLORAR_TOPE_DIAG", 60))
+# Método 2: Cristian eligió diagnosticar TODAS las que pasan (5-nov-2026). Con
+# un tope de 60 por fuerza, VRSN y FAST quedaban en los puestos 137 y 109 y no
+# se les calculaba fase. El 400 es solo un techo de seguridad; las series de
+# 5 años quedan en la caché de server.py, así que la segunda corrida del día
+# es rápida.
+TOPE_DIAG_M2 = int(__import__("os").environ.get("EXPLORAR_TOPE_DIAG_M2", 400))
 
 TTL_SERIE = 12 * 3600
 _SERIES_CACHE = {}          # ticker -> {"puntos": [...], "ts": epoch}
@@ -684,6 +734,7 @@ def _metricas_de_serie(puntos):
         "sma50": _sma(c, 50),
         "sma200": _sma(c, 200),
         "volM": round((sum(vols) / len(vols)) / 1e6, 2) if vols else None,
+        "max52": max(c[-252:]),
         "cierres": c,
     }
 
@@ -755,7 +806,7 @@ def _comparar_lote(metricas, cuantas=None):
     }
 
 
-def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"):
+def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla", metodo="1"):
     """
     Aplica los 7 filtros y devuelve (pasos, sobrevivientes_por_etapa).
 
@@ -778,9 +829,16 @@ def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"
     pasos.append({"filtro": f"Precio ≥ {umbrales['precio']:g} USD", "detalle": "descarta chatarra",
                   "quedan": len(vivos), "grupo": "calidad"})
 
-    vivos = {t: m for t, m in vivos.items() if ok(m.get("volM"), umbrales["volM"])}
-    pasos.append({"filtro": f"Volumen 90 d ≥ {umbrales['volM']:g} M", "detalle": "entras y sales sin mover el precio",
-                  "quedan": len(vivos), "grupo": "calidad"})
+    if metodo == "2":
+        # Liquidez en DÓLARES: precio × volumen medio de 90 días.
+        vivos = {t: m for t, m in vivos.items() if ok(m.get("montoM"), umbrales["montoM"])}
+        pasos.append({"filtro": f"Monto diario ≥ US$ {umbrales['montoM']:g} M",
+                      "detalle": "entras y sales sin mover el precio (en dólares, no castiga a las caras)",
+                      "quedan": len(vivos), "grupo": "calidad"})
+    else:
+        vivos = {t: m for t, m in vivos.items() if ok(m.get("volM"), umbrales["volM"])}
+        pasos.append({"filtro": f"Volumen 90 d ≥ {umbrales['volM']:g} M", "detalle": "entras y sales sin mover el precio",
+                      "quedan": len(vivos), "grupo": "calidad"})
 
     vivos = {t: m for t, m in vivos.items()
              if m.get("sma50") and m["precio"] > m["sma50"]}
@@ -792,10 +850,17 @@ def embudo(metricas, umbrales, detalle_inicio="S&P 500 + Nasdaq-100 + tu grilla"
     pasos.append({"filtro": "SMA 50 > SMA 200", "detalle": "la tendencia de fondo es alcista",
                   "quedan": len(vivos), "grupo": "tendencia"})
 
+    if metodo == "2":
+        vivos = {t: m for t, m in vivos.items()
+                 if isinstance(m.get("distMax"), (int, float)) and m["distMax"] <= umbrales["distMax"]}
+        pasos.append({"filtro": f"A ≤ {umbrales['distMax']:g} % de su máximo de 52 semanas",
+                      "detalle": "cerca de romper: de ahí sale la zona de compra",
+                      "quedan": len(vivos), "grupo": "tendencia"})
+
     return pasos, vivos
 
 
-def embudo_fundamental(vivos, fund, umbrales, sin_fundamentales=None):
+def embudo_fundamental(vivos, fund, umbrales, sin_fundamentales=None, metodo="1"):
     """
     Segunda mitad del embudo: los tres filtros que necesitan Yahoo.
 
@@ -848,10 +913,16 @@ def embudo_fundamental(vivos, fund, umbrales, sin_fundamentales=None):
 
     filtrar("capB", umbrales["capB"], f"Capitalización ≥ {umbrales['capB']:g} B",
             "empresas de tamaño real")
-    filtrar("crecBpa", umbrales["crecimiento"], f"BPA dil. TTM YoY ≥ {umbrales['crecimiento']:g} %",
-            "gana más que hace un año")
-    filtrar("crecVentas", umbrales["crecimiento"], f"Ingresos TTM YoY ≥ {umbrales['crecimiento']:g} %",
-            "y vende más")
+    if metodo == "2":
+        # Método 2: solo que las ventas no caigan. El "¿crece de verdad?" fino
+        # lo responde después la ficha fundamental, igual que en el método 1.
+        filtrar("crecVentas", umbrales["crecVentas"], f"Ingresos TTM YoY ≥ {umbrales['crecVentas']:g} %",
+                "las ventas no caen")
+    else:
+        filtrar("crecBpa", umbrales["crecimiento"], f"BPA dil. TTM YoY ≥ {umbrales['crecimiento']:g} %",
+                "gana más que hace un año")
+        filtrar("crecVentas", umbrales["crecimiento"], f"Ingresos TTM YoY ≥ {umbrales['crecimiento']:g} %",
+                "y vende más")
 
     # Una accion que fallo un filtro REAL (dato presente, no alcanza el
     # umbral) no es dudosa: no pasa, y punto. Solo quedan las que se cayeron
@@ -872,8 +943,10 @@ _ESTADO = {
     "iniciado": None,
     "terminado": None,
     "error": None,
+    "metodo": None,           # el método de la corrida en curso (o la última)
 }
-_RESULTADO = {"datos": None, "ts": 0}
+# Un resultado por método (5-nov-2026): correr el 2 no borra el del 1.
+_RESULTADOS = {m: {"datos": None, "ts": 0} for m in METODOS}
 
 
 def _reportes_explorar(tickers):
@@ -915,22 +988,30 @@ def _set(etapa, progreso):
     print(f"[explorar] {progreso:3d}% · {etapa}")
 
 
-def estado():
+def _metodo_ok(metodo):
+    return metodo if metodo in METODOS else "1"
+
+
+def estado(metodo="1"):
+    metodo = _metodo_ok(metodo)
     with _LOCK:
         e = dict(_ESTADO)
-    edad = time.time() - _RESULTADO["ts"] if _RESULTADO["ts"] else None
-    e["hayResultado"] = _RESULTADO["datos"] is not None
+    r = _RESULTADOS[metodo]
+    edad = time.time() - r["ts"] if r["ts"] else None
+    e["metodoConsultado"] = metodo
+    e["hayResultadoPorMetodo"] = {m: _RESULTADOS[m]["datos"] is not None for m in METODOS}
+    e["hayResultado"] = r["datos"] is not None
     e["edadResultadoSeg"] = int(edad) if edad is not None else None
     e["resultadoVencido"] = bool(edad is not None and edad > TTL_RESULTADO)
     return e
 
 
-def resultado():
-    return _RESULTADO["datos"]
+def resultado(metodo="1"):
+    return _RESULTADOS[_metodo_ok(metodo)]["datos"]
 
 
 def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=None,
-              sin_fundamentales=None):
+              sin_fundamentales=None, metodo="1"):
     """
     El pipeline completo. `serie_5y(ticker)` y `indice_5y()` los inyecta
     server.py para reusar SU cache de 24h -- este modulo no la duplica.
@@ -1039,7 +1120,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             if f["precio"] and f["sma50"] and f["sma200"]:
                 metricas[t] = {"precio": f["precio"], "sma50": f["sma50"],
                                "sma200": f["sma200"], "volM": f["volM"],
-                               "capB": f["capB"], "fuente": "tradingview"}
+                               "capB": f["capB"], "max52": f.get("max52"),
+                               "fuente": "tradingview"}
         universo = sorted(set(universo) | set(metricas))
         print(f"[explorar] TradingView: {len(metricas)} acciones con precio y "
               f"medias en {diag_tv.get('segundos')} s. Universo: {len(universo)}.")
@@ -1167,7 +1249,8 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
                            if nucleo_sin_datos else ""))
               if nucleo_completo else f"en {nucleo_revisado}") if nucleo_set else "")
     )
-    pasos_a, vivos = embudo(metricas, umbrales, detalle_inicio)
+    _completar_metricas(metricas)
+    pasos_a, vivos = embudo(metricas, umbrales, detalle_inicio, metodo)
 
     # ---- Paso 2b · capitalizacion y crecimiento ---------------------------
     # OJO: los fundamentales se piden SOLO para las que pasaron precio,
@@ -1244,7 +1327,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         print(f"[explorar] {rescatadas_cap} capitalizaciones rescatadas del "
               f"lote (quoteSummary no las trajo).")
     pasos_b, vivos, sin_dato, dudosas = embudo_fundamental(
-        vivos, fund, umbrales, sin_fundamentales)
+        vivos, fund, umbrales, sin_fundamentales, metodo)
     pasos = pasos_a + pasos_b
     tras_embudo = sorted(vivos.keys())
     # Las dudosas tambien se diagnostican: si ademas resultan estar en fase 2
@@ -1295,14 +1378,19 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
     # (`vivos_tendencia`), hasta TOPE_DIAG, ordenadas por volumen. Cada
     # diagnostico cuesta una serie de 5 años, asi que el tope es real y la
     # app dice cuantas quedaron sin diagnosticar en vez de esconderlo.
+    # Método 2: se ordenan por monto en dólares (si el tope de seguridad
+    # llegara a cortar, quedan primero las más líquidas de verdad) y el tope
+    # es TOPE_DIAG_M2 -- "todas", como eligió Cristian.
+    campo_liq = "montoM" if metodo == "2" else "volM"
+    tope_diag = TOPE_DIAG_M2 if metodo == "2" else TOPE_DIAG
     candidatos_diag = sorted(
         vivos_tendencia.keys(),
-        key=lambda t: -((vivos_tendencia[t] or {}).get("volM") or 0),
+        key=lambda t: -((vivos_tendencia[t] or {}).get(campo_liq) or 0),
     )
     # Las que pasaron el embudo entero van SIEMPRE, aunque sean poco liquidas:
     # son el resultado principal y quedarse sin su fase seria absurdo.
     a_diagnosticar = list(dict.fromkeys(
-        tras_embudo + candidatos_diag[:TOPE_DIAG] + dudosas_diag))
+        tras_embudo + candidatos_diag[:tope_diag] + dudosas_diag))
     sin_diagnosticar = [t for t in vivos_tendencia if t not in set(a_diagnosticar)]
 
     _set(f"Fase y fuerza de {len(a_diagnosticar)} acciones…", 74)
@@ -1335,6 +1423,9 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "crecBpa": f.get("crecBpa"),
             "crecVentas": f.get("crecVentas"),
             "volM": metricas_t.get("volM"),
+            "montoM": metricas_t.get("montoM"),
+            "max52": metricas_t.get("max52"),
+            "distMax": metricas_t.get("distMax"),
             "fase": sem.get("fase") if sem.get("disponible") else None,
             "confirmaciones": n_conf,
             "veredictoSemanal": sem.get("veredicto"),
@@ -1398,6 +1489,11 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "n": f.get("nombre") or t,
             "p": round(m["precio"], 2),
             "v": m.get("volM"),
+            # Método 2 (5-nov-2026): mo monto diario US$ M · mx máximo 52
+            # semanas · dm % bajo ese máximo.
+            "mo": m.get("montoM"),
+            "mx": round(m["max52"], 2) if isinstance(m.get("max52"), (int, float)) else None,
+            "dm": m.get("distMax"),
             "c50": round(m["sma50"], 2) if m.get("sma50") else None,
             "c200": round(m["sma200"], 2) if m.get("sma200") else None,
             "cB": f.get("capB"),
@@ -1503,8 +1599,10 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         "sectoresFuertes": [x["nombre"] for x in sectores[:3]],
         "industriasFuertes": [x["nombre"] for x in industrias[:3]],
         "cobertura": round(len(metricas) / max(1, len(universo) - len(bajo_piso)) * 100),
+        "metodo": metodo,
         "frase": (
-            f"{len(finalistas)} candidata(s) sobre {len(metricas)} acciones revisadas"
+            ("Método 2 · calidad en tendencia: " if metodo == "2" else "")
+            + f"{len(finalistas)} candidata(s) sobre {len(metricas)} acciones revisadas"
             + (f", más {len(revisar_a_mano)} para mirar a mano" if revisar_a_mano else "")
             + f". Los sectores que tiran: {', '.join(x['nombre'] for x in sectores[:3])}."
         ),
@@ -1516,6 +1614,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         "revisarAMano": revisar_a_mano,
         "generado": datetime.now(timezone.utc).isoformat(),
         "duracionSeg": int(time.time() - t0),
+        "metodo": metodo,
         "umbrales": umbrales,
         "sectores": sectores,
         "industrias": industrias,
@@ -1577,11 +1676,15 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "conFundamentales": sorted(vivos_tendencia.keys()),
             "diagnosticadas": sorted(diags.keys()),
             "sinDiagnosticar": sorted(sin_diagnosticar),
-            "topeDiag": TOPE_DIAG,
-            "nota": "Los fundamentales solo se pidieron para las que pasaron "
-                    "precio/volumen/tendencia, y la fase de Weinstein solo "
-                    "para las mas liquidas de esas. Aflojar un filtro mas "
-                    "alla de ese conjunto necesita volver a ejecutar.",
+            "topeDiag": tope_diag,
+            "nota": ("Los fundamentales y la fase de Weinstein se pidieron para "
+                     "todas las que pasaron precio/monto/tendencia/cercanía al "
+                     "máximo. Aflojar un filtro más allá de ese conjunto "
+                     "necesita volver a ejecutar." if metodo == "2" else
+                     "Los fundamentales solo se pidieron para las que pasaron "
+                     "precio/volumen/tendencia, y la fase de Weinstein solo "
+                     "para las mas liquidas de esas. Aflojar un filtro mas "
+                     "alla de ese conjunto necesita volver a ejecutar."),
         },
         "candidatas": candidatas,
         "caidas": caidas,
@@ -1668,7 +1771,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
 
 
 def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None, rotacion=None,
-            sin_fundamentales=None):
+            sin_fundamentales=None, metodo="1"):
     """
     Arranca el analisis en un hilo. Devuelve (arrancó, motivo).
 
@@ -1679,23 +1782,24 @@ def iniciar(universo, serie_5y, indice_5y, umbrales=None, nucleo=None, rotacion=
     with _LOCK:
         if _ESTADO["estado"] == "corriendo":
             return False, "ya_corriendo"
+        metodo = _metodo_ok(metodo)
         _ESTADO.update({"estado": "corriendo", "etapa": "Arrancando…", "progreso": 0,
                         "iniciado": datetime.now(timezone.utc).isoformat(),
-                        "terminado": None, "error": None})
+                        "terminado": None, "error": None, "metodo": metodo})
 
-    umb = dict(UMBRALES)
+    umb = umbrales_base(metodo)
     if umbrales:
         for k in umb:
             v = umbrales.get(k)
-            if isinstance(v, (int, float)) and v >= 0:
+            if isinstance(v, (int, float)) and (v >= 0 or k == "crecVentas"):
                 umb[k] = float(v)
 
     def _correr():
         try:
             datos = _analizar(universo, serie_5y, indice_5y, umb, nucleo, rotacion,
-                              sin_fundamentales)
-            _RESULTADO["datos"] = datos
-            _RESULTADO["ts"] = time.time()
+                              sin_fundamentales, metodo)
+            _RESULTADOS[metodo]["datos"] = datos
+            _RESULTADOS[metodo]["ts"] = time.time()
             with _LOCK:
                 _ESTADO.update({"estado": "listo",
                                 "terminado": datetime.now(timezone.utc).isoformat()})

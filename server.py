@@ -2708,7 +2708,10 @@ def explorar_run():
         except (TypeError, ValueError):
             return None
 
-    umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento")}
+    # Método 1 (crecimiento) o 2 (calidad en tendencia), 5-nov-2026.
+    metodo = request.args.get("metodo") if request.args.get("metodo") in explorar.METODOS else "1"
+    umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento",
+                                     "montoM", "distMax", "crecVentas")}
     universo, info_universo = universo_mercado.ampliar_universo(
         UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR)
     # El nucleo va aparte para que explorar.py pueda decir si alcanzo a
@@ -2726,14 +2729,14 @@ def explorar_run():
         # Bitcoin (y lo que se agregue despues a SIN_FUNDAMENTALES en
         # main.py) no tiene capitalizacion ni crecimiento de empresa -- ver
         # el comentario largo junto a SIN_FUNDAMENTALES.
-        sin_fundamentales=SIN_FUNDAMENTALES)
+        sin_fundamentales=SIN_FUNDAMENTALES, metodo=metodo)
 
     if not arranco:
         return jsonify({"arrancado": False, "motivo": motivo,
-                        "estado": explorar.estado()}), 409
-    return jsonify({"arrancado": True, "universo": len(universo),
+                        "estado": explorar.estado(metodo)}), 409
+    return jsonify({"arrancado": True, "universo": len(universo), "metodo": metodo,
                     "universoInfo": info_universo,
-                    "estado": explorar.estado()})
+                    "estado": explorar.estado(metodo)})
 
 
 @app.route("/fundamentales-diag", methods=["GET"])
@@ -2805,7 +2808,7 @@ def fundamentales_diag():
 @app.route("/explorar/estado", methods=["GET"])
 def explorar_estado():
     """Como va la corrida. Barato: no toca la red, solo lee variables."""
-    return jsonify(explorar.estado())
+    return jsonify(explorar.estado(request.args.get("metodo") or "1"))
 
 
 @app.route("/explorar/resultado", methods=["GET"])
@@ -2819,10 +2822,11 @@ def explorar_resultado():
     que las suscripciones de push (disco efimero de Render). Correr de nuevo
     tarda lo mismo que la primera vez.
     """
-    datos = explorar.resultado()
+    metodo = request.args.get("metodo") or "1"
+    datos = explorar.resultado(metodo)
     if datos is None:
-        return jsonify({"hayResultado": False, "estado": explorar.estado()}), 404
-    return jsonify({"hayResultado": True, "estado": explorar.estado(), "analisis": datos})
+        return jsonify({"hayResultado": False, "estado": explorar.estado(metodo)}), 404
+    return jsonify({"hayResultado": True, "estado": explorar.estado(metodo), "analisis": datos})
 
 
 @app.route("/explorar/resumen", methods=["GET"])
@@ -2841,14 +2845,15 @@ def explorar_resumen():
     Esto devuelve solo la parte que se lee: la alerta, el embudo paso a paso,
     las finalistas, las de revisar a mano y de donde salieron los datos.
     """
-    datos = explorar.resultado()
+    metodo = request.args.get("metodo") or "1"
+    datos = explorar.resultado(metodo)
     if datos is None:
-        return jsonify({"hayResultado": False, "estado": explorar.estado()}), 404
+        return jsonify({"hayResultado": False, "estado": explorar.estado(metodo)}), 404
     liviano = {k: v for k, v in datos.items() if k != "acciones"}
     liviano["accionesRevisadas"] = len(datos.get("acciones") or [])
     liviano["nota"] = ("Resumen sin el detalle por accion. El analisis completo, "
                        "con las metricas de cada una, esta en /explorar/resultado.")
-    return jsonify({"hayResultado": True, "estado": explorar.estado(),
+    return jsonify({"hayResultado": True, "estado": explorar.estado(metodo),
                     "analisis": liviano})
 
 
