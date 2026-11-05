@@ -454,6 +454,43 @@ TICKERS_USA = [
     "CNC",
 
     # -----------------------------------------------------------------------
+    # AGREGADA A PEDIDO DE CRISTIAN (5-nov-2026)
+    # -----------------------------------------------------------------------
+    #   XMHQ -- Invesco S&P MidCap Quality ETF (NYSE Arca). Sigue al S&P
+    #           MidCap 400 Quality: ~80 empresas MEDIANAS elegidas por
+    #           rentabilidad sobre patrimonio, calidad de las utilidades
+    #           (accruals) y bajo apalancamiento. Es ETF de FACTOR -- el
+    #           hermano de QUAL en empresas medianas --, asi que ADEMAS va a
+    #           ETFS_NO_ANALIZAR y a ETFS_OTROS mas abajo. NO va en
+    #           ETFS_SECTOR ni en ETFS_INDUSTRIA.
+    #
+    # La grilla pasa de 223 a 224 (44 ETF). Igual que las anteriores, se
+    # agrega sin sacar nada; si aparecen 429 de Yahoo y tarjetas en
+    # "Calculando...", ahi toca recortar.
+    "XMHQ",
+
+    # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (5-nov-2026, segundo pedido)
+    # -----------------------------------------------------------------------
+    # El pedido traia ocho: XBI, XMHQ, MTD, VLTO, VRSN, CCEP, WSM y FAST.
+    # XBI (ETF de industria), XMHQ (recien agregado), CCEP y FAST ya tenian
+    # tarjeta -- no se repiten (romperia el assert de mas abajo). Entran:
+    #
+    #   MTD  -- Mettler-Toledo (NYSE). Instrumentos de precision para
+    #           laboratorio e industria.
+    #   VLTO -- Veralto (NYSE). Calidad de agua y marcado/codificacion de
+    #           envases; separada de Danaher en 2023.
+    #   VRSN -- VeriSign (Nasdaq). Registro de los dominios .com y .net.
+    #   WSM  -- Williams-Sonoma (NYSE). Retail de articulos para el hogar.
+    #
+    # Las cuatro son acciones normales (NO ETF) y ya estaban en el embudo de
+    # Explorar por ser del S&P 500; lo nuevo es la TARJETA en la grilla.
+    # La grilla pasa de 224 a 228. Igual que las anteriores, se agrega sin
+    # sacar nada; si aparecen 429 de Yahoo y tarjetas en "Calculando...",
+    # ahi toca recortar.
+    "MTD", "VLTO", "VRSN", "WSM",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
@@ -645,6 +682,7 @@ ETFS_NO_ANALIZAR = (
     # a VLUE. Ninguno tiene capitalizacion ni crecimiento de utilidades.
     + ["GLD", "SLV", "DBC", "TLT", "VIG", "MTUM", "QUAL", "USMV"]
     + ["EWJ"]                                             # pais: Japon (8-oct-2026)
+    + ["XMHQ"]                                            # factor calidad, empresas medianas (5-nov-2026)
     # Los 23 del paso 1 de Explorar (incluye ITA y IYT, que antes estaban
     # escritos a mano aca). Se leen de la lista de arriba a proposito: asi
     # agregar un sector nuevo NO obliga a acordarse de excluirlo tambien.
@@ -701,6 +739,7 @@ ETFS_OTROS = [
     ("Factor value",                 "VLUE"),
     ("Factor momentum",              "MTUM"),
     ("Factor calidad",               "QUAL"),
+    ("Factor calidad mid cap",       "XMHQ"),
     ("Factor mínima volatilidad",    "USMV"),
 ]
 
