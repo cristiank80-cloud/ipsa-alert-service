@@ -114,6 +114,13 @@ UMBRALES = {
 #
 # Decisiones de Cristian (5-nov-2026): a ≤ 5 % del máximo de 52 semanas,
 # ventas ≥ 0 %, y fase de Weinstein para TODAS las que pasen (no tope de 60).
+#
+# 6-nov-2026, probado contra las 19 compras del reporte (8-sep a 3-nov), con
+# los precios del día de cada compra: todas pasaban precio, monto, tendencia
+# y ventas; el 5 % dejaba fuera 5 (CF, CDNA, ZETA, WT, BE) y las 4
+# confirmaciones otras 5, porque la de volumen casi nunca aparece en estas
+# acciones (3 de 19). Cristian eligió 8 % y 3 confirmaciones: con eso, 14 de
+# las 19 habrían salido el día de la compra.
 # El resto del método (precio, capitalización, tendencia, fase 2 con 4+
 # confirmaciones, score y fuerza relativa, ficha fundamental, una por motor)
 # es el mismo en los dos.
@@ -121,8 +128,9 @@ UMBRALES_M2 = {
     "precio": 10.0,
     "capB": 2.0,
     "montoM": 20.0,      # monto medio diario en millones de US$ (precio × volumen 90 d)
-    "distMax": 5.0,      # cuánto bajo su máximo de 52 semanas puede estar, en %
+    "distMax": 8.0,      # cuánto bajo su máximo de 52 semanas puede estar, en %
     "crecVentas": 0.0,   # ventas TTM contra los 12 meses anteriores, en %
+    "conf": 3,           # confirmaciones de fase 2 que se exigen (el método 1 pide 4)
 }
 METODOS = ("1", "2")
 
@@ -1028,17 +1036,38 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
         print(f"[explorar] AVISO: el benchmark trajo {len(bench)} cierres, "
               f"la ventana de 12 meses puede quedar incompleta.")
 
+    # El S&P 500 para la fase de los ETF (la misma serie del paso 3; server.py
+    # la tiene en cache, asi que pedirla aca no cuesta una descarga mas).
+    try:
+        idx_etf = indice_5y()
+    except Exception:
+        idx_etf = None
+
     def _etf(par):
         nombre, sim = par
         c = _cierres(_serie_1y(sim, "2y"))
         if len(c) < 30:
             return None
         fr = _fuerza_vs_benchmark(c, bench)
+        # Contra el S&P 500 (6-nov-2026): sin el indice, la confirmacion de
+        # fuerza relativa (c4) nunca contaba y ningun ETF llegaba a 4 de 5.
         fase = indicador_fuerza_fase.evaluar_semanal(
-            data_source.get_price_history(sim, "5y", suffix="") or [], None)
+            data_source.get_price_history(sim, "5y", suffix="") or [], idx_etf)
+        sem = fase or {}
+        # Candidatas ETF de la app (6-nov-2026): precio, medias, maximo de 52
+        # semanas (con cierres) y confirmaciones.
+        precio = c[-1]
+        s50, s200 = _sma(c, 50), _sma(c, 200)
+        max52 = max(c[-252:])
         return {
             "nombre": nombre, "etf": sim, "fuerza": fr,
-            "fase": (fase or {}).get("fase") if (fase or {}).get("disponible") else None,
+            "fase": sem.get("fase") if sem.get("disponible") else None,
+            "conf": sem.get("scoreConfirmaciones") if sem.get("disponible") else None,
+            "precio": round(precio, 2),
+            "sma50": round(s50, 2) if s50 else None,
+            "sma200": round(s200, 2) if s200 else None,
+            "max52": round(max52, 2),
+            "dm": round(max(0.0, (1 - precio / max52) * 100), 2) if max52 else None,
         }
 
     _set("Midiendo 11 sectores contra el S&P 500…", 8)
@@ -1426,6 +1455,7 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             "montoM": metricas_t.get("montoM"),
             "max52": metricas_t.get("max52"),
             "distMax": metricas_t.get("distMax"),
+            "distEMA21": dia.get("distanciaEMA21Pct") if dia.get("disponible") else None,
             "fase": sem.get("fase") if sem.get("disponible") else None,
             "confirmaciones": n_conf,
             "veredictoSemanal": sem.get("veredicto"),
@@ -1492,6 +1522,9 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
             # Método 2 (5-nov-2026): mo monto diario US$ M · mx máximo 52
             # semanas · dm % bajo ese máximo.
             "mo": m.get("montoM"),
+            # de: % sobre (o bajo) la EMA 21 diaria. Para la marca "en
+            # retroceso" del método 2 (6-nov-2026).
+            "de": dia.get("distanciaEMA21Pct") if dia.get("disponible") else None,
             "mx": round(m["max52"], 2) if isinstance(m.get("max52"), (int, float)) else None,
             "dm": m.get("distMax"),
             "c50": round(m["sma50"], 2) if m.get("sma50") else None,
@@ -1514,8 +1547,12 @@ def _analizar(universo, serie_5y, indice_5y, umbrales, nucleo=None, rotacion=Non
 
     acciones = [_fila(t, m) for t, m in sorted(metricas.items())]
 
+    # Confirmaciones mínimas: 4 en el método 1; en el 2, las que diga
+    # umbrales["conf"] (3 desde el 6-nov-2026, ver UMBRALES_M2).
+    conf_min = int(umbrales.get("conf", 4))
+
     def _pasa_weinstein(c):
-        return c["fase"] == 2 and isinstance(c["confirmaciones"], int) and c["confirmaciones"] >= 4
+        return c["fase"] == 2 and isinstance(c["confirmaciones"], int) and c["confirmaciones"] >= conf_min
 
     def _pasa_fuerza(c):
         # El documento pide DOS cosas, no una: score 6-8 **y** la linea de

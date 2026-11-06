@@ -730,7 +730,20 @@ def guardar_alertas_precio():
             desde = pos.get("desde")
             pos = ({"compra": float(compra), "desde": str(desde)[:10]}
                    if isinstance(compra, (int, float)) and compra > 0 and isinstance(desde, str) else None)
-        if sube is None and baja is None and zona is None and pos is None:
+        # piso (6-nov-2026): ETF que tienes. {"nivel", "viernes", "fecha"} = el
+        # del reporte (numero fijo); {"media": 200, "banda": 2} = la regla por
+        # defecto, que se calcula aca al cierre porque la media se mueve.
+        piso = obj.get("piso") if isinstance(obj.get("piso"), dict) else None
+        if piso is not None:
+            nivel = piso.get("nivel")
+            if isinstance(nivel, (int, float)) and nivel > 0:
+                piso = {"nivel": float(nivel), "viernes": bool(piso.get("viernes")),
+                        "fecha": str(piso.get("fecha") or "")[:10]}
+            elif piso.get("media") in (150, 200) and isinstance(piso.get("banda", 2), (int, float)):
+                piso = {"media": int(piso["media"]), "banda": float(piso.get("banda", 2))}
+            else:
+                piso = None
+        if sube is None and baja is None and zona is None and pos is None and piso is None:
             continue  # sin objetivo activo, no hay nada que guardar/chequear
         limpio[ticker] = {
             "sube": float(sube) if isinstance(sube, (int, float)) else None,
@@ -741,6 +754,8 @@ def guardar_alertas_precio():
             limpio[ticker]["zona"] = zona
         if pos is not None:
             limpio[ticker]["pos"] = pos
+        if piso is not None:
+            limpio[ticker]["piso"] = piso
 
     try:
         with open(OBJETIVOS_FILE, "w") as f:
@@ -1753,7 +1768,7 @@ def _tareas_al_cierre(enviar=True, forzar=False):
     ahora_ny = datetime.now(TZ_NY)
     hoy = ahora_ny.date()
     estado = _leer_estado_clase()
-    res = {"fecha": hoy.isoformat(), "zona": [], "mercado": None, "stops": [], "omitido": None}
+    res = {"fecha": hoy.isoformat(), "zona": [], "mercado": None, "stops": [], "pisos": [], "omitido": None}
 
     if not forzar:
         if hoy.weekday() >= 5:
@@ -1841,8 +1856,56 @@ def _tareas_al_cierre(enviar=True, forzar=False):
             continue  # ya se aviso este mismo numero
         res["stops"].append(dict(det, ticker=t, mercado=mercado, propuesto=prop, actual=actual, precio=precio))
 
+    # ---- 4. Piso de los ETF que tienes (6-nov-2026) -------------------------
+    # La regla del reporte: si cierra bajo el piso, vende todo. Una vez por
+    # cruce: mientras siga bajo no se repite; si vuelve sobre el piso, el
+    # proximo cruce se avisa de nuevo.
+    pisos_av = dict(estado.get("pisosAvisados") or {})
+    pisos_recuperados = []
+    for t, o in objetivos.items():
+        pz = (o or {}).get("piso")
+        if not pz or not (o or {}).get("pos") or (o.get("mercado") or "USD") != "USD":
+            continue
+        q = q_usd.get(t)
+        precio = q.get("price") if q else None
+        if not isinstance(precio, (int, float)):
+            continue
+        if _fecha_en(q.get("marketTime"), TZ_NY) != hoy and not forzar:
+            continue
+        if pz.get("viernes") and hoy.weekday() != 4:
+            continue  # regla semanal: solo cuenta el cierre del viernes
+        if pz.get("nivel"):
+            nivel = pz["nivel"]
+            f_ = pz.get("fecha") or ""
+            base = "el piso del reporte" + (f" del {f_[8:10]}/{f_[5:7]}/{f_[:4]}" if len(f_) == 10 else "") \
+                   + (" (cierre del viernes)" if pz.get("viernes") else "")
+        else:
+            try:
+                serie = _serie5y_ticker(t, True) or []
+            except Exception:
+                serie = []
+            n = int(pz.get("media", 200))
+            previos = [x["close"] for x in serie if x["date"][:10] < hoy.isoformat() and x.get("close")]
+            if len(previos) < n - 1:
+                continue
+            sma = (sum(previos[-(n - 1):]) + precio) / n
+            nivel = sma * (1 - float(pz.get("banda", 2)) / 100)
+            base = f"media de {n} días −{formato.num(pz.get('banda', 2), 0)} %"
+        if precio < nivel:
+            if pisos_av.get(t):
+                continue  # ya se aviso este cruce
+            res["pisos"].append({"ticker": t, "cierre": precio, "nivel": round(nivel, 2), "base": base})
+        elif t in pisos_av:
+            pisos_recuperados.append(t)
+
     # ---- Avisar ------------------------------------------------------------
     lineas_push, cuerpo = [], [f"Cierre de Nueva York · {hoy.strftime('%d/%m/%Y')}", ""]
+    for pz in res["pisos"]:
+        lineas_push.append(f"{pz['ticker']} cerró bajo su piso ({_fmt_precio(pz['cierre'], 'USD')} < {_fmt_precio(pz['nivel'], 'USD')})")
+        cuerpo.append(f"PISO · {pz['ticker']} cerró en {_fmt_precio(pz['cierre'], 'USD')}, bajo su piso de "
+                      f"{_fmt_precio(pz['nivel'], 'USD')} ({pz['base']}). La regla vende todo; la app no vende sola.")
+    if res["pisos"]:
+        cuerpo.append("")
     for z in res["zona"]:
         lineas_push.append(f"{z['ticker']} cerró dentro de su zona ({_fmt_precio(z['cierre'], z['mercado'])})")
         cuerpo.append(f"ZONA DE COMPRA · {z['ticker']} cerró en {_fmt_precio(z['cierre'], z['mercado'])}, "
@@ -1879,6 +1942,11 @@ def _tareas_al_cierre(enviar=True, forzar=False):
         for s_ in res["stops"]:
             ultimos[s_["ticker"]] = s_["propuesto"]
         estado["stopsAvisados"] = ultimos
+        for pz in res["pisos"]:
+            pisos_av[pz["ticker"]] = hoy.isoformat()
+        for t in pisos_recuperados:
+            pisos_av.pop(t, None)
+        estado["pisosAvisados"] = pisos_av
         estado["cierre"] = hoy.isoformat()
         _guardar_estado_clase(estado)
     return res
@@ -2711,7 +2779,7 @@ def explorar_run():
     # Método 1 (crecimiento) o 2 (calidad en tendencia), 5-nov-2026.
     metodo = request.args.get("metodo") if request.args.get("metodo") in explorar.METODOS else "1"
     umbrales = {k: _num(k) for k in ("precio", "capB", "volM", "crecimiento",
-                                     "montoM", "distMax", "crecVentas")}
+                                     "montoM", "distMax", "crecVentas", "conf")}
     universo, info_universo = universo_mercado.ampliar_universo(
         UNIVERSO_ANALISIS, ETFS_NO_ANALIZAR)
     # El nucleo va aparte para que explorar.py pueda decir si alcanzo a
