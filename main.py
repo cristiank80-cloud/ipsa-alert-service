@@ -491,6 +491,25 @@ TICKERS_USA = [
     "MTD", "VLTO", "VRSN", "WSM",
 
     # -----------------------------------------------------------------------
+    # AGREGADAS A PEDIDO DE CRISTIAN (13-nov-2026)
+    # -----------------------------------------------------------------------
+    #   LFST -- LifeStance Health Group (Nasdaq). Salud mental ambulatoria en
+    #           EE.UU.: psiquiatras, psicologos y terapeutas, en consulta y
+    #           por telemedicina, pagados sobre todo por seguros. Accion
+    #           normal: NO es ETF.
+    #   TGTX -- TG Therapeutics (Nasdaq). Biotecnologia; vive de Briumvi
+    #           (ublituximab), anticuerpo anti-CD20 para la esclerosis
+    #           multiple recurrente. Accion normal: NO es ETF.
+    #
+    # Ninguna es del S&P 500 ni del Nasdaq-100, asi que este es el unico
+    # lugar que las mete al embudo de Explorar. Las dos tienen historial de
+    # sobra (LFST salio a bolsa en jun-2021; TGTX cotiza hace mas de una
+    # decada). La grilla pasa de 228 a 230. Igual que las anteriores, se
+    # agrega sin sacar nada; si aparecen 429 de Yahoo y tarjetas en
+    # "Calculando...", ahi toca recortar.
+    "LFST", "TGTX",
+
+    # -----------------------------------------------------------------------
     # LOS ETF DE SECTOR E INDUSTRIA (27-ago-2026)
     # -----------------------------------------------------------------------
     # Son los mismos 23 que Explorar mide en el paso 1 -- ITA e IYT ya
